@@ -142,20 +142,13 @@ async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     status_msg = await update.message.reply_text(f"🎨 Generating image for: '{prompt}'... [0s]")
     
-    base_url, api_key = get_image_provider_info()
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "User-Agent": "HermesTelegramBot/1.0"
-    }
+    import urllib.parse
+    import random
     
-    payload = {
-        "model": "grok-imagine-2",
-        "prompt": prompt,
-        "n": 1,
-        "size": "1024x1024"
-    }
-
+    encoded_prompt = urllib.parse.quote(prompt)
+    seed = random.randint(1, 1000000)
+    image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&seed={seed}&nologo=true"
+    
     start_time = time.time()
 
     async def update_timer():
@@ -171,17 +164,10 @@ async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             pass
 
     timer_task = asyncio.create_task(update_timer())
-
+    
     try:
-        response = await http_client.post(
-            f"{base_url}/images/generations",
-            headers=headers,
-            json=payload,
-            timeout=120.0
-        )
+        response = await http_client.get(image_url, timeout=120.0)
         response.raise_for_status()
-        data = response.json()
-        image_url = data['data'][0]['url']
         
         timer_task.cancel()
         elapsed_total = int(time.time() - start_time)
