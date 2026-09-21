@@ -297,7 +297,14 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     web_context = ""
     search_failed = False
     
-    if '?' in user_message or any(trigger in user_message_lower for trigger in search_triggers):
+    # Smart heuristics to avoid searching for math, short words, or basic greetings
+    is_math = bool(re.fullmatch(r'^[0-9\s\+\-\*\/\(\)\=\.a-zA-Z]+\??$', user_message)) and len(user_message.split()) <= 4
+    ignore_phrases = ["how are you", "who are you", "what are you", "hello", "hi", "thanks", "thank you", "good morning", "goodnight", "bye"]
+    is_greeting = any(phrase == user_message_lower.strip('?.,! ') for phrase in ignore_phrases)
+    
+    needs_search = not is_math and not is_greeting and ('?' in user_message or any(trigger in user_message_lower for trigger in search_triggers))
+    
+    if needs_search:
         search_query = re.sub(r'^(what do you say about|what do you know about|what do you think about|do you know about|can you tell me about|tell me about|what is|who is|what\'s|search for|look up|latest|news|today)\s+', '', user_message_lower).strip('?.,!')
         if not search_query:
             search_query = user_message.strip('?.,!')
@@ -394,6 +401,15 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # ==========================================
 # Main Application Entry Point
 # ==========================================
+async def post_init(application: Application) -> None:
+    """Send a notification to the admin when the bot starts up."""
+    try:
+        if ADMIN_ID:
+            await application.bot.send_message(chat_id=ADMIN_ID, text="🚀 **System Reboot Complete!** All AI servers are online and RAG search is active.", parse_mode='Markdown')
+            logger.info("Startup notification sent to Admin.")
+    except Exception as e:
+        logger.error(f"Failed to send startup notification: {e}")
+
 def main() -> None:
     if not BOT_TOKEN:
         logger.error("BOT_TOKEN is missing or empty. Please check your config.py.")
@@ -409,7 +425,7 @@ def main() -> None:
     except Exception as e:
         logger.error(f"Failed to start keep-alive server: {e}")
 
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    application = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
