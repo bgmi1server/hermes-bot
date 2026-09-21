@@ -370,7 +370,7 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if len(chat_histories[user.id]) > MAX_HISTORY:
         chat_histories[user.id] = chat_histories[user.id][-MAX_HISTORY:]
         
-    system_prompt = {"role": "system", "content": "You are a helpful AI assistant. If real-time web search context is provided, you MUST base your answer entirely on it, even if it contradicts your internal knowledge. Trust the search context as absolute truth."}
+    system_prompt = {"role": "system", "content": "You are a helpful AI assistant running inside a Telegram bot. CRITICAL RULES: 1) NEVER use tool_call, function_call, XML tags, or any structured output formats — only respond with plain conversational text. 2) If real-time web search context is provided, base your answer on it. 3) Be concise and natural."}
     
     messages = [system_prompt] + chat_histories[user.id]
     # -------------------------
@@ -399,9 +399,16 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             response.raise_for_status()
             data = response.json()
             reply_text = data['choices'][0]['message']['content']
-            # Strip any raw tool_call / XML tags that some models output
+            # Strip ALL known tool_call formats before sending to user:
+            # Format 1: Standard  <tool_call>...</tool_call>
+            # Format 2: Claude's  <tool_call>...<|tool_call_argument_end|>
+            # Format 3: Any orphaned <tool_call>... leaking to end of string
             import re as _re
-            reply_text = _re.sub(r'<tool_call>.*?</tool_call>', '', reply_text, flags=_re.DOTALL).strip()
+            reply_text = _re.sub(r'<tool_call>.*?</tool_call>', '', reply_text, flags=_re.DOTALL)
+            reply_text = _re.sub(r'<tool_call>.*?<\|tool_call_argument_end\|>', '', reply_text, flags=_re.DOTALL)
+            reply_text = _re.sub(r'<tool_call>.*$', '', reply_text, flags=_re.DOTALL)
+            reply_text = _re.sub(r'<\|tool_call_argument_begin\|>.*?<\|tool_call_argument_end\|>', '', reply_text, flags=_re.DOTALL)
+            reply_text = reply_text.strip()
             
             # --- Save Assistant Reply to Memory ---
             chat_histories[user.id].append({"role": "assistant", "content": reply_text})
