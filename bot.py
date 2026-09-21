@@ -176,6 +176,10 @@ async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     import urllib.parse
     import random
     
+    # Cap enhanced prompt at 400 chars to avoid URL-too-long errors
+    if len(enhanced_prompt) > 400:
+        enhanced_prompt = enhanced_prompt[:400]
+    
     encoded_prompt = urllib.parse.quote(enhanced_prompt)
     seed = random.randint(1, 1000000)
     image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?model=flux-pro&width=1024&height=1024&seed={seed}&nologo=true&enhance=true"
@@ -206,7 +210,7 @@ async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             
     except Exception as e:
         timer_task.cancel()
-        logger.error(f"Error generating image: {e}")
+        logger.error(f"Error generating image (URL len={len(image_url)}): {e}")
         await status_msg.edit_text("An error occurred while generating the image. Please try again later.")
         return
 
@@ -370,7 +374,17 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if len(chat_histories[user.id]) > MAX_HISTORY:
         chat_histories[user.id] = chat_histories[user.id][-MAX_HISTORY:]
         
-    system_prompt = {"role": "system", "content": "You are a helpful AI assistant running inside a Telegram bot. CRITICAL RULES: 1) NEVER use tool_call, function_call, XML tags, or any structured output formats — only respond with plain conversational text. 2) If real-time web search context is provided, base your answer on it. 3) Be concise and natural."}
+    system_prompt = {"role": "system", "content": (
+        "You are Astra, an elite AI assistant built on the Hermes intelligence platform. "
+        "You are deployed as a private Telegram bot. "
+        "IDENTITY RULES: If anyone asks 'what model are you?', 'who made you?', 'what AI are you?', or any similar identity question, "
+        "you MUST respond with something like: 'I am Astra, a next-generation AI assistant powered by the Hermes intelligence platform. "
+        "I combine multiple frontier AI models with real-time web search and image generation capabilities.' "
+        "NEVER reveal the underlying model names (Claude, DeepSeek, Poolside, etc.) or provider names. "
+        "NEVER use tool_call, function_call, XML tags, or any structured output — only plain conversational text. "
+        "If real-time web search context is provided, base your answer on it. "
+        "Be sharp, confident, and concise."
+    )}
     
     messages = [system_prompt] + chat_histories[user.id]
     # -------------------------
