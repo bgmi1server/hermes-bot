@@ -24,11 +24,16 @@ def get_vyce_key():
 
 HCNSEC_API_KEY = os.environ.get("HCNSEC_API_KEY", "")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
+POOLSIDE_API_KEY = os.environ.get("POOLSIDE_API_KEY", "")
 
 # ==================================
 # Model Routing Registry
 # ==================================
 MODELS = {
+    # Poolside AI Models (Fast, Free)
+    "poolside/laguna-s-2.1": {"url": "https://inference.poolside.ai/v1", "key": POOLSIDE_API_KEY},
+    "poolside/laguna-xs-2.1": {"url": "https://inference.poolside.ai/v1", "key": POOLSIDE_API_KEY},
+
     # VyceAI Models (Uses round-robin keys)
     "claude-sonnet-4-6": {"url": "https://vyceai.com/v1", "key_func": get_vyce_key},
     "agnes-3.0-flash": {"url": "https://vyceai.com/v1", "key_func": get_vyce_key},
