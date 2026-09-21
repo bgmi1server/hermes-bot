@@ -309,7 +309,7 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     is_image_request = (has_action and has_subject) or "imagine" in user_message_lower or "draw me" in user_message_lower
     
     if is_image_request:
-        user_message += "\n\n[System Note: You are about to generate the requested image. First, reply with a short, excited 1-sentence message saying you're on it. Do NOT say you can't generate images. Do NOT output any XML, JSON, or tool_call tags.]"
+        user_message += "\n\n[System Note: The image is being generated separately by a dedicated image engine. Your ONLY job right now is to reply with a single short, excited plain-text sentence hyping up what you are about to generate. NO URLs. NO markdown. NO image links. NO code. Just one enthusiastic plain sentence.]"
 
     await update.message.reply_chat_action("typing")
     
@@ -413,15 +413,14 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             response.raise_for_status()
             data = response.json()
             reply_text = data['choices'][0]['message']['content']
-            # Strip ALL known tool_call formats before sending to user:
-            # Format 1: Standard  <tool_call>...</tool_call>
-            # Format 2: Claude's  <tool_call>...<|tool_call_argument_end|>
-            # Format 3: Any orphaned <tool_call>... leaking to end of string
+            # Strip ALL known tool_call formats
             import re as _re
             reply_text = _re.sub(r'<tool_call>.*?</tool_call>', '', reply_text, flags=_re.DOTALL)
             reply_text = _re.sub(r'<tool_call>.*?<\|tool_call_argument_end\|>', '', reply_text, flags=_re.DOTALL)
             reply_text = _re.sub(r'<tool_call>.*$', '', reply_text, flags=_re.DOTALL)
             reply_text = _re.sub(r'<\|tool_call_argument_begin\|>.*?<\|tool_call_argument_end\|>', '', reply_text, flags=_re.DOTALL)
+            # Strip self-generated markdown image links like ![alt](url)
+            reply_text = _re.sub(r'!\[.*?\]\(https?://[^\)]+\)', '', reply_text, flags=_re.DOTALL)
             reply_text = reply_text.strip()
             
             # --- Save Assistant Reply to Memory ---
