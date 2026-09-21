@@ -295,15 +295,15 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     user_message_lower = user_message.lower()
     
     # Auto-detect if the user is asking for an image
-    image_triggers = [
-        "generate an image", "create an image", "draw a", "draw me", 
-        "make a picture", "show me a picture", "generate a picture", 
-        "create a picture", "generate image", "imagine",
-        "give me an image", "give me a picture", "give me a photo",
-        "can you draw", "can you generate", "picture of a", "image of a",
-        "photo of a"
-    ]
-    if any(trigger in user_message_lower for trigger in image_triggers):
+    # Smart combo detection: any action word + any image word = image request
+    image_action_words = ["generate", "create", "make", "draw", "design", "produce", "show", "give", "build", "craft", "paint", "render", "imagine", "visualize"]
+    image_subject_words = ["image", "picture", "photo", "pic", "drawing", "illustration", "artwork", "avatar", "logo", "banner", "thumbnail", "wallpaper", "portrait", "poster", "graphic"]
+    
+    has_action = any(word in user_message_lower.split() for word in image_action_words)
+    has_subject = any(word in user_message_lower for word in image_subject_words)
+    is_image_request = (has_action and has_subject) or "imagine" in user_message_lower or "draw me" in user_message_lower
+    
+    if is_image_request:
         context.args = user_message.split()
         asyncio.create_task(imagine_command(update, context))
         user_message += "\n\n[System Note: The system has already started generating the requested image in the background. DO NOT apologize for not being able to generate images. If the user asked an additional question, answer it now. If they only asked for an image, just enthusiastically say you are generating it!]"
