@@ -424,18 +424,10 @@ async def post_init(application: Application) -> None:
     """Send a notification to the admin when the bot starts up."""
     try:
         if ADMIN_ID:
-            await application.bot.send_message(chat_id=ADMIN_ID, text="🚀 **System Reboot Complete!** All AI servers are online and RAG search is active.", parse_mode='Markdown')
+            await application.bot.send_message(chat_id=ADMIN_ID, text="🚀 **Deployment Successful!** New AI instance is online and routing traffic.", parse_mode='Markdown')
             logger.info("Startup notification sent to Admin.")
     except Exception as e:
         logger.error(f"Failed to send startup notification: {e}")
-async def post_stop(application: Application) -> None:
-    """Send a notification to the admin when the bot is shutting down."""
-    try:
-        if ADMIN_ID:
-            await application.bot.send_message(chat_id=ADMIN_ID, text="⚠️ **Server Shutting Down...** Preparing for reboot or code update.", parse_mode='Markdown')
-            logger.info("Shutdown notification sent to Admin.")
-    except Exception as e:
-        logger.error(f"Failed to send shutdown notification: {e}")
 
 def main() -> None:
     if not BOT_TOKEN:
@@ -452,7 +444,7 @@ def main() -> None:
     except Exception as e:
         logger.error(f"Failed to start keep-alive server: {e}")
 
-    application = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).post_stop(post_stop).build()
+    application = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
