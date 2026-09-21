@@ -222,6 +222,8 @@ def parse_markdown_to_html(text):
 # ==========================================
 # Message Handler (Chatting with LLM)
 # ==========================================
+chat_histories = {}
+MAX_HISTORY = 10
 async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if not is_authorized(user.id):
@@ -341,6 +343,21 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if web_context:
         final_user_message = f"{web_context}\n\nUser Question:\n{user_message}"
     
+    # --- Memory Management ---
+    if user.id not in chat_histories:
+        chat_histories[user.id] = []
+        
+    chat_histories[user.id].append({"role": "user", "content": final_user_message})
+    
+    # Keep only the last MAX_HISTORY messages
+    if len(chat_histories[user.id]) > MAX_HISTORY:
+        chat_histories[user.id] = chat_histories[user.id][-MAX_HISTORY:]
+        
+    system_prompt = {"role": "system", "content": "You are a helpful AI assistant. If real-time web search context is provided, you MUST base your answer entirely on it, even if it contradicts your internal knowledge. Trust the search context as absolute truth."}
+    
+    messages = [system_prompt] + chat_histories[user.id]
+    # -------------------------
+
     max_retries = 3
     for attempt in range(max_retries):
         base_url, api_key = get_provider_info(model_to_use)
@@ -352,10 +369,7 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         
         payload = {
             "model": model_to_use,
-            "messages": [
-                {"role": "system", "content": "You are a helpful AI assistant. If real-time web search context is provided, you MUST base your answer entirely on it, even if it contradicts your internal knowledge. Trust the search context as absolute truth."},
-                {"role": "user", "content": final_user_message}
-            ]
+            "messages": messages
         }
         
         try:
@@ -368,6 +382,11 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             response.raise_for_status()
             data = response.json()
             reply_text = data['choices'][0]['message']['content']
+            
+            # --- Save Assistant Reply to Memory ---
+            chat_histories[user.id].append({"role": "assistant", "content": reply_text})
+            # ----------------------------------------
+            
             formatted_text = parse_markdown_to_html(reply_text)
             
             if status_msg and not search_failed:
