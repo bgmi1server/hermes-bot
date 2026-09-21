@@ -292,8 +292,9 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 await status_msg.edit_text("Error rewriting prompt. Please try again.")
                 return
 
+    # Store original message BEFORE appending any system notes
+    original_user_message = user_message
     user_message_lower = user_message.lower()
-    
     # Auto-detect if the user is asking for an image
     # Smart combo detection: any action word + any image word = image request
     image_action_words = ["generate", "create", "make", "draw", "design", "produce", "show", "give", "build", "craft", "paint", "render", "imagine", "visualize"]
@@ -304,7 +305,7 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     is_image_request = (has_action and has_subject) or "imagine" in user_message_lower or "draw me" in user_message_lower
     
     if is_image_request:
-        user_message += "\n\n[System Note: You are about to generate the requested image. First, reply with a short, excited 1-sentence message saying you're on it. Do NOT say you can't generate images.]"
+        user_message += "\n\n[System Note: You are about to generate the requested image. First, reply with a short, excited 1-sentence message saying you're on it. Do NOT say you can't generate images. Do NOT output any XML, JSON, or tool_call tags.]"
 
     await update.message.reply_chat_action("typing")
     
@@ -398,6 +399,9 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             response.raise_for_status()
             data = response.json()
             reply_text = data['choices'][0]['message']['content']
+            # Strip any raw tool_call / XML tags that some models output
+            import re as _re
+            reply_text = _re.sub(r'<tool_call>.*?</tool_call>', '', reply_text, flags=_re.DOTALL).strip()
             
             # --- Save Assistant Reply to Memory ---
             chat_histories[user.id].append({"role": "assistant", "content": reply_text})
@@ -409,7 +413,7 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 try:
                     await status_msg.edit_text(formatted_text, parse_mode='HTML')
                 except Exception:
-                    await status_msg.edit_text(reply_text) # Fallback if HTML fails
+                    await status_msg.edit_text(reply_text)
             else:
                 try:
                     await update.message.reply_text(formatted_text, parse_mode='HTML')
@@ -417,8 +421,9 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     await update.message.reply_text(reply_text)
             
             # Fire image generation AFTER the LLM reply is delivered
+            # Use original_user_message to keep the prompt clean (no system notes!)
             if is_image_request:
-                context.args = user_message.split()
+                context.args = original_user_message.split()
                 asyncio.create_task(imagine_command(update, context))
             
             return # Success!
