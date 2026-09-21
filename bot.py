@@ -304,9 +304,18 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     image_action_words = ["generate", "create", "make", "draw", "design", "produce", "show", "give", "build", "craft", "paint", "render", "imagine", "visualize"]
     image_subject_words = ["image", "picture", "photo", "pic", "drawing", "illustration", "artwork", "avatar", "logo", "banner", "thumbnail", "wallpaper", "portrait", "poster", "graphic"]
     
+    # Exclusion phrases — user is asking ABOUT image generation, not requesting one
+    image_exclusion_phrases = [
+        "give me a prompt", "give me prompts", "prompt to generate", "prompt for generating",
+        "how to generate", "how do i generate", "how can i generate", "how to create",
+        "what prompt", "suggest a prompt", "write a prompt", "prompt for image",
+        "tips for", "guide for", "help me generate", "ideas for"
+    ]
+    
     has_action = any(word in user_message_lower.split() for word in image_action_words)
     has_subject = any(word in user_message_lower for word in image_subject_words)
-    is_image_request = (has_action and has_subject) or "imagine" in user_message_lower or "draw me" in user_message_lower
+    is_excluded = any(phrase in user_message_lower for phrase in image_exclusion_phrases)
+    is_image_request = not is_excluded and ((has_action and has_subject) or "imagine" in user_message_lower or "draw me" in user_message_lower)
     
     if is_image_request:
         user_message += "\n\n[System Note: The image is being generated separately by a dedicated image engine. Your ONLY job right now is to reply with a single short, excited plain-text sentence hyping up what you are about to generate. NO URLs. NO markdown. NO image links. NO code. Just one enthusiastic plain sentence.]"
