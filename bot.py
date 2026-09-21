@@ -400,6 +400,15 @@ def main() -> None:
         return
 
     logger.info("Starting Hermes Bot with VyceAI integration...")
+    
+    # Start the dummy web server for Render health checks
+    try:
+        from keep_alive import keep_alive
+        keep_alive()
+        logger.info("Keep-alive server started.")
+    except Exception as e:
+        logger.error(f"Failed to start keep-alive server: {e}")
+
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start_command))
