@@ -304,9 +304,7 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     is_image_request = (has_action and has_subject) or "imagine" in user_message_lower or "draw me" in user_message_lower
     
     if is_image_request:
-        context.args = user_message.split()
-        asyncio.create_task(imagine_command(update, context))
-        user_message += "\n\n[System Note: The system has already started generating the requested image in the background. DO NOT apologize for not being able to generate images. If the user asked an additional question, answer it now. If they only asked for an image, just enthusiastically say you are generating it!]"
+        user_message += "\n\n[System Note: You are about to generate the requested image. First, reply with a short, excited 1-sentence message saying you're on it. Do NOT say you can't generate images.]"
 
     await update.message.reply_chat_action("typing")
     
@@ -417,6 +415,12 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     await update.message.reply_text(formatted_text, parse_mode='HTML')
                 except Exception:
                     await update.message.reply_text(reply_text)
+            
+            # Fire image generation AFTER the LLM reply is delivered
+            if is_image_request:
+                context.args = user_message.split()
+                asyncio.create_task(imagine_command(update, context))
+            
             return # Success!
             
         except Exception as e:
