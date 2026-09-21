@@ -140,15 +140,47 @@ async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text("Please provide a prompt. Usage: /imagine <your prompt>")
         return
 
-    status_msg = await update.message.reply_text(f"🎨 Generating image for: '{prompt}'... [0s]")
+    status_msg = await update.message.reply_text(f"✨ Enhancing your prompt with AI...")
     
+    # --- Step 1: AI Prompt Enhancement ---
+    model_to_use = get_next_model() if current_model == "auto" else current_model
+    base_url, api_key = get_provider_info(model_to_use)
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "User-Agent": "HermesTelegramBot/1.0"
+    }
+    enhance_payload = {
+        "model": model_to_use,
+        "messages": [
+            {"role": "system", "content": "You are an expert AI image prompt engineer. Your ONLY job is to take a user's simple idea and rewrite it as a single, richly detailed, photorealistic image generation prompt. Include: art style, lighting, camera angle, mood, quality tags (e.g. 8K, ultra-detailed, cinematic). Output ONLY the final prompt text, with NO extra commentary, NO quotes, NO labels."},
+            {"role": "user", "content": f"Enhance this prompt: {prompt}"}
+        ]
+    }
+    
+    enhanced_prompt = prompt  # fallback to original if LLM fails
+    try:
+        enhance_resp = await http_client.post(
+            f"{base_url}/chat/completions",
+            headers=headers,
+            json=enhance_payload,
+            timeout=30.0
+        )
+        enhance_resp.raise_for_status()
+        enhanced_prompt = enhance_resp.json()['choices'][0]['message']['content'].strip()
+        logger.info(f"Prompt enhanced: {enhanced_prompt}")
+    except Exception as e:
+        logger.warning(f"Prompt enhancement failed, using original: {e}")
+
+    # --- Step 2: Generate with flux-pro on Pollinations ---
     import urllib.parse
     import random
     
-    encoded_prompt = urllib.parse.quote(prompt)
+    encoded_prompt = urllib.parse.quote(enhanced_prompt)
     seed = random.randint(1, 1000000)
-    image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&seed={seed}&nologo=true"
+    image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?model=flux-pro&width=1024&height=1024&seed={seed}&nologo=true&enhance=true"
     
+    await status_msg.edit_text(f"🎨 Generating HD image... [0s]")
     start_time = time.time()
 
     async def update_timer():
@@ -157,7 +189,7 @@ async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 await asyncio.sleep(2)
                 elapsed = int(time.time() - start_time)
                 try:
-                    await status_msg.edit_text(f"🎨 Generating image for: '{prompt}'... [{elapsed}s]")
+                    await status_msg.edit_text(f"🎨 Generating HD image... [{elapsed}s]")
                 except Exception:
                     pass
         except asyncio.CancelledError:

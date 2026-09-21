@@ -24,15 +24,25 @@ def get_vyce_key():
 
 HCNSEC_API_KEY = os.environ.get("HCNSEC_API_KEY", "")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
-POOLSIDE_API_KEY = os.environ.get("POOLSIDE_API_KEY", "")
+
+# Poolside AI — Round-robin across multiple keys
+POOLSIDE_API_KEYS = [
+    os.environ.get("POOLSIDE_API_KEY_1", ""),
+    os.environ.get("POOLSIDE_API_KEY_2", "")
+]
+POOLSIDE_API_KEYS = [k for k in POOLSIDE_API_KEYS if k]  # Filter empty
+poolside_key_iterator = itertools.cycle(POOLSIDE_API_KEYS) if POOLSIDE_API_KEYS else None
+
+def get_poolside_key():
+    return next(poolside_key_iterator) if poolside_key_iterator else ""
 
 # ==================================
 # Model Routing Registry
 # ==================================
 MODELS = {
-    # Poolside AI Models (Fast, Free)
-    "poolside/laguna-s-2.1": {"url": "https://inference.poolside.ai/v1", "key": POOLSIDE_API_KEY},
-    "poolside/laguna-xs-2.1": {"url": "https://inference.poolside.ai/v1", "key": POOLSIDE_API_KEY},
+    # Poolside AI Models (Round-robin keys)
+    "poolside/laguna-s-2.1": {"url": "https://inference.poolside.ai/v1", "key_func": get_poolside_key},
+    "poolside/laguna-xs-2.1": {"url": "https://inference.poolside.ai/v1", "key_func": get_poolside_key},
 
     # VyceAI Models (Uses round-robin keys)
     "claude-sonnet-4-6": {"url": "https://vyceai.com/v1", "key_func": get_vyce_key},
