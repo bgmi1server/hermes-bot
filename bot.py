@@ -295,7 +295,7 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     status_msg = None
     
     # Auto-detect if user is asking for facts/news and needs web context
-    search_triggers = ["latest", "news", "today", "who is", "what is", "what's", "do you know", "search for", "look up", "tell me about", "current", "what do you"]
+    search_triggers = ["latest news", "news about", "today", "search for", "look up", "current events", "latest updates"]
     web_context = ""
     search_failed = False
     
@@ -304,7 +304,7 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     ignore_phrases = ["how are you", "who are you", "what are you", "hello", "hi", "thanks", "thank you", "good morning", "goodnight", "bye"]
     is_greeting = any(phrase == user_message_lower.strip('?.,! ') for phrase in ignore_phrases)
     
-    needs_search = not is_math and not is_greeting and ('?' in user_message or any(trigger in user_message_lower for trigger in search_triggers))
+    needs_search = not is_math and not is_greeting and any(trigger in user_message_lower for trigger in search_triggers)
     
     if needs_search:
         search_query = re.sub(r'^(what do you say about|what do you know about|what do you think about|do you know about|can you tell me about|tell me about|what is|who is|what\'s|search for|look up|latest|news|today)\s+', '', user_message_lower).strip('?.,!')
