@@ -23,53 +23,63 @@ except ImportError:
 # ==========================================
 # Logging Configuration
 # ==========================================
+import logging.handlers
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
+    handlers=[
+        logging.StreamHandler(),
+        logging.handlers.RotatingFileHandler('bot.log', maxBytes=1024*1024, backupCount=2, encoding='utf-8')
+    ]
 )
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-current_model = DEFAULT_MODEL
+# Global State
+user_models = {}  # {user_id: model_name}
+maintenance_mode = False
+banned_users = set()
 
 # Global HTTP client for connection pooling (speeds up requests)
 http_client = httpx.AsyncClient(timeout=120.0)
 
 import json
 import os
+import urllib.request
+import urllib.error
 
 # ==========================================
 # Dynamic User Management (GitHub Issue DB)
 # ==========================================
-import urllib.request
-import urllib.error
-
-def _load_authorized_users() -> set:
-    """Load dynamically added users from GitHub Issue #1 (Free DB)."""
+def _load_authorized_users() -> tuple[set, set]:
+    """Load dynamically added users and banned users from GitHub Issue #1."""
     try:
         from config import GITHUB_PAT
         if not GITHUB_PAT:
-            return set()
+            return set(), set()
         req = urllib.request.Request("https://api.github.com/repos/bgmi1server/hermes-bot/issues/1")
         req.add_header("Authorization", f"token {GITHUB_PAT}")
         req.add_header("Accept", "application/vnd.github.v3+json")
         req.add_header("User-Agent", "HermesBot")
         with urllib.request.urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode())
-            body_json = json.loads(data.get("body", '{"users": []}'))
-            return set(body_json.get("users", []))
+            body_json = json.loads(data.get("body", '{"users": [], "banned": []}'))
+            return set(body_json.get("users", [])), set(body_json.get("banned", []))
     except Exception as e:
-        logger.error(f"Failed to load users from GitHub: {e}")
-    return set()
+        logger.error(f"Failed to load DB from GitHub: {e}")
+    return set(), set()
 
 def _save_authorized_users() -> None:
-    """Persist the current dynamic user set to GitHub Issue #1."""
+    """Persist the current dynamic user set and banned list to GitHub Issue #1."""
     try:
         from config import GITHUB_PAT
         if not GITHUB_PAT:
             return
         
-        body_content = json.dumps({"users": list(authorized_users - set(GUEST_IDS))})
+        body_content = json.dumps({
+            "users": list(authorized_users - set(GUEST_IDS)),
+            "banned": list(banned_users)
+        })
         payload = json.dumps({"body": body_content}).encode('utf-8')
         
         req = urllib.request.Request("https://api.github.com/repos/bgmi1server/hermes-bot/issues/1", data=payload, method="PATCH")
@@ -79,36 +89,60 @@ def _save_authorized_users() -> None:
         with urllib.request.urlopen(req, timeout=10) as response:
             pass
     except Exception as e:
-        logger.error(f"Failed to save users to GitHub: {e}")
+        logger.error(f"Failed to save DB to GitHub: {e}")
 
-# In-memory set: base GUEST_IDS from config + dynamically added users
-authorized_users: set = set(GUEST_IDS) | _load_authorized_users()
+# In-memory sets
+_db_users, _db_banned = _load_authorized_users()
+authorized_users: set = set(GUEST_IDS) | _db_users
+banned_users.update(_db_banned)
 
-def is_authorized(user_id: int) -> bool:
-    return user_id == ADMIN_ID or user_id in authorized_users
+async def check_access(update: Update) -> bool:
+    user = update.effective_user
+    if user.id == ADMIN_ID:
+        return True
+    if user.id in banned_users:
+        await update.message.reply_text("🚫 You have been banned from using this bot.")
+        return False
+    if maintenance_mode:
+        await update.message.reply_text("🔧 The bot is currently undergoing maintenance. Please try again later.")
+        return False
+    if user.id not in authorized_users:
+        await update.message.reply_text("⛔ Unauthorized access. You are not on the guest list.")
+        return False
+    return True
 
 # ==========================================
 # Command Handlers
 # ==========================================
+async def notify_admin_error(context: ContextTypes.DEFAULT_TYPE, location: str, error: Exception) -> None:
+    if ADMIN_ID:
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"🚨 **Critical Error Alert**\n\n**Location:** `{location}`\n**Error:** `{error}`",
+                parse_mode='Markdown'
+            )
+        except Exception:
+            pass
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    if not is_authorized(user.id):
-        await update.message.reply_text("Unauthorized access. You cannot use this bot.")
+    if not await check_access(update):
         return
 
+    user_model = user_models.get(user.id, DEFAULT_MODEL)
     welcome_msg = (
         f"Hello {user.first_name}! I am Hermes, your AI assistant.\n\n"
-        f"Currently using model: {current_model}\n\n"
+        f"Currently using model: {user_model}\n\n"
         "You can chat with me directly, use /search to find information, or use /imagine to generate images!"
     )
     await update.message.reply_text(welcome_msg)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    if not is_authorized(user.id):
-        await update.message.reply_text("Unauthorized access.")
+    if not await check_access(update):
         return
 
+    user_model = user_models.get(user.id, DEFAULT_MODEL)
     help_msg = (
         "Available Commands:\n"
         "/start - Start interacting with the bot\n"
@@ -116,35 +150,35 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/search <query> - Search DuckDuckGo for the given query\n"
         "/imagine <prompt> - Generate an image using Grok\n"
         "/model - List available models or switch model (/model <name>)\n\n"
-        f"Current model: {current_model}\n"
+        f"Current model: {user_model}\n"
         "Just type any message to chat!"
     )
     await update.message.reply_text(help_msg)
 
 async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    global current_model
     user = update.effective_user
-    if not is_authorized(user.id):
+    if not await check_access(update):
         return
 
+    user_model = user_models.get(user.id, DEFAULT_MODEL)
     if not context.args:
         models_str = "\n".join([f"- {m}" for m in AVAILABLE_MODELS])
         await update.message.reply_text(
-            f"Currently using: {current_model}\n\nAvailable models:\n- auto (Round-robin across all)\n{models_str}\n\n"
+            f"Currently using: {user_model}\n\nAvailable models:\n- auto (Round-robin across all)\n{models_str}\n\n"
             "To switch, use: /model <model_name> or /model auto"
         )
         return
 
     requested_model = context.args[0]
     if requested_model == "auto" or requested_model in AVAILABLE_MODELS:
-        current_model = requested_model
-        await update.message.reply_text(f"Successfully switched to model: {current_model}")
+        user_models[user.id] = requested_model
+        await update.message.reply_text(f"Successfully switched to model: {requested_model}")
     else:
         await update.message.reply_text(f"Invalid model. Please choose 'auto' or from the available models.")
 
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    if not is_authorized(user.id):
+    if not await check_access(update):
         return
 
     query = " ".join(context.args) if context.args else None
@@ -245,10 +279,127 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         parse_mode='Markdown'
     )
 
+async def maintenance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global maintenance_mode
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        return
+    maintenance_mode = not maintenance_mode
+    state = "ON" if maintenance_mode else "OFF"
+    await update.message.reply_text(f"🔧 Maintenance mode is now *{state}*.", parse_mode='Markdown')
 
+async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /ban <user_id>")
+        return
+    try:
+        b_id = int(context.args[0])
+        banned_users.add(b_id)
+        if b_id in authorized_users:
+            authorized_users.discard(b_id)
+        _save_authorized_users()
+        await update.message.reply_text(f"🔨 User `{b_id}` has been permanently banned.", parse_mode='Markdown')
+    except ValueError:
+        await update.message.reply_text("Invalid user ID.")
+
+async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /unban <user_id>")
+        return
+    try:
+        b_id = int(context.args[0])
+        if b_id in banned_users:
+            banned_users.discard(b_id)
+            _save_authorized_users()
+            await update.message.reply_text(f"🕊️ User `{b_id}` has been unbanned.", parse_mode='Markdown')
+        else:
+            await update.message.reply_text("User is not banned.")
+    except ValueError:
+        await update.message.reply_text("Invalid user ID.")
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /broadcast <message>")
+        return
+    
+    message = " ".join(context.args)
+    success = 0
+    await update.message.reply_text(f"📢 Broadcasting to {len(authorized_users)} users...")
+    
+    for uid in authorized_users:
+        try:
+            await context.bot.send_message(chat_id=uid, text=f"📢 **Announcement from Admin:**\n\n{message}", parse_mode='Markdown')
+            success += 1
+        except Exception:
+            pass
+            
+    await update.message.reply_text(f"✅ Broadcast sent to {success}/{len(authorized_users)} users.")
+
+bot_start_time = time.time()
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        return
+        
+    uptime_seconds = int(time.time() - bot_start_time)
+    m, s = divmod(uptime_seconds, 60)
+    h, m = divmod(m, 60)
+    uptime_str = f"{h}h {m}m {s}s"
+    
+    stats_text = (
+        "📊 **Bot Statistics**\n\n"
+        f"⏱️ Uptime: `{uptime_str}`\n"
+        f"👥 Users: `{len(authorized_users)}`\n"
+        f"🚫 Banned: `{len(banned_users)}`\n"
+        f"🤖 Models: `{len(AVAILABLE_MODELS)}`\n"
+        f"🔧 Maintenance: `{'ON' if maintenance_mode else 'OFF'}`"
+    )
+    await update.message.reply_text(stats_text, parse_mode='Markdown')
+
+async def clearhistory_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /clearhistory <user_id>")
+        return
+    try:
+        t_id = int(context.args[0])
+        if t_id in chat_histories:
+            chat_histories[t_id] = []
+            await update.message.reply_text(f"🧹 History cleared for `{t_id}`.", parse_mode='Markdown')
+        else:
+            await update.message.reply_text("No history found for that user.")
+    except ValueError:
+        await update.message.reply_text("Invalid user ID.")
+
+async def logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        return
+        
+    try:
+        with open('bot.log', 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+            last_lines = "".join(lines[-30:])
+            if not last_lines.strip():
+                last_lines = "Log file is empty."
+            await update.message.reply_text(f"📜 **System Logs (Last 30 lines):**\n```\n{last_lines}\n```", parse_mode='Markdown')
+    except Exception as e:
+        await update.message.reply_text(f"❌ Failed to read logs: {e}")
 async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    if not is_authorized(user.id):
+    if not await check_access(update):
         return
 
     prompt = " ".join(context.args) if context.args else None
@@ -260,7 +411,8 @@ async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     status_msg = await update.message.reply_text(f"✨ Enhancing your prompt with AI...")
     
     # --- Step 1: AI Prompt Enhancement ---
-    model_to_use = get_next_model() if current_model == "auto" else current_model
+    user_model = user_models.get(user.id, DEFAULT_MODEL)
+    model_to_use = get_next_model() if user_model == "auto" else user_model
     base_url, api_key, extra_headers = get_provider_info(model_to_use)
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -363,7 +515,7 @@ def parse_markdown_to_html(text):
 # ==========================================
 async def summarize_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
     """Auto-triggered when a YouTube URL is detected in a message."""
-    if not is_authorized(update.effective_user.id):
+    if not await check_access(update):
         return
 
     status_msg = await update.message.reply_text("🎬 Fetching video transcript...")
@@ -395,7 +547,8 @@ async def summarize_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         await status_msg.edit_text("🧠 Summarizing...")
 
         # Ask the LLM to summarize
-        model_to_use = get_next_model() if current_model == "auto" else current_model
+        user_model = user_models.get(update.effective_user.id, DEFAULT_MODEL)
+        model_to_use = get_next_model() if user_model == "auto" else user_model
         base_url, api_key, extra_headers = get_provider_info(model_to_use)
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -434,7 +587,7 @@ async def summarize_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 async def summarize_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Triggered when user sends any document/file to the bot."""
     user = update.effective_user
-    if not is_authorized(user.id):
+    if not await check_access(update):
         return
 
     doc = update.message.document
@@ -488,7 +641,8 @@ async def summarize_document(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         await status_msg.edit_text(f"🧠 Summarizing *{file_name}*...", parse_mode='Markdown')
 
-        model_to_use = get_next_model() if current_model == "auto" else current_model
+        user_model = user_models.get(user.id, DEFAULT_MODEL)
+        model_to_use = get_next_model() if user_model == "auto" else user_model
         base_url, api_key, extra_headers = get_provider_info(model_to_use)
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -571,14 +725,15 @@ chat_histories = {}
 MAX_HISTORY = 10
 async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE, voice_text: str = None) -> None:
     user = update.effective_user
-    if not is_authorized(user.id):
+    if not await check_access(update):
         return
 
     user_message = voice_text if voice_text else update.message.text
     if not user_message:
         return
         
-    model_to_use = get_next_model() if current_model == "auto" else current_model
+    user_model = user_models.get(user.id, DEFAULT_MODEL)
+    model_to_use = get_next_model() if user_model == "auto" else user_model
         
     # Check if this is a reply to a generated image (Image modification request)
     if update.message.reply_to_message and update.message.reply_to_message.photo:
@@ -832,6 +987,7 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE, voice
                     status_msg = await update.message.reply_text(f"⚠️ Model failed, auto-retrying with {model_to_use}...")
             else:
                 err_msg = "An error occurred communicating with all AI models. Please try again later."
+                await notify_admin_error(context, "chat_message (All models failed)", e)
                 if status_msg:
                     await status_msg.edit_text(err_msg)
                 else:
@@ -845,7 +1001,7 @@ import edge_tts
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    if not is_authorized(user.id):
+    if not await check_access(update):
         return
 
     status_msg = await update.message.reply_text("🎙️ Listening...")
@@ -944,7 +1100,14 @@ async def post_init(application: Application) -> None:
                 admin_cmds = basic_cmds + [
                     {'command': 'adduser', 'description': 'Add a new user (Admin)'},
                     {'command': 'removeuser', 'description': 'Remove a user (Admin)'},
-                    {'command': 'users', 'description': 'List all authorized users (Admin)'}
+                    {'command': 'users', 'description': 'List all authorized users (Admin)'},
+                    {'command': 'broadcast', 'description': 'Send announcement to all users (Admin)'},
+                    {'command': 'stats', 'description': 'View bot statistics (Admin)'},
+                    {'command': 'logs', 'description': 'View recent system logs (Admin)'},
+                    {'command': 'clearhistory', 'description': 'Clear user memory (Admin)'},
+                    {'command': 'maintenance', 'description': 'Toggle maintenance mode (Admin)'},
+                    {'command': 'ban', 'description': 'Permanently ban a user (Admin)'},
+                    {'command': 'unban', 'description': 'Unban a user (Admin)'}
                 ]
                 # Set admin commands ONLY for the Admin
                 await http_client.post(url, json={'commands': admin_cmds, 'scope': {'type': 'chat', 'chat_id': ADMIN_ID}}, timeout=10.0)
@@ -990,6 +1153,13 @@ def main() -> None:
     application.add_handler(CommandHandler("adduser", adduser_command))
     application.add_handler(CommandHandler("removeuser", removeuser_command))
     application.add_handler(CommandHandler("users", users_command))
+    application.add_handler(CommandHandler("broadcast", broadcast_command))
+    application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("logs", logs_command))
+    application.add_handler(CommandHandler("clearhistory", clearhistory_command))
+    application.add_handler(CommandHandler("maintenance", maintenance_command))
+    application.add_handler(CommandHandler("ban", ban_command))
+    application.add_handler(CommandHandler("unban", unban_command))
     application.add_handler(MessageHandler(filters.Document.ALL, summarize_document))
     application.add_handler(MessageHandler(filters.VOICE, handle_voice))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat_message))
