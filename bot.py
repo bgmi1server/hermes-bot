@@ -924,33 +924,39 @@ async def check_models_health(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def post_init(application: Application) -> None:
     """Setup custom command menus and start background tasks."""
     try:
-        # 1. Set Command Menus
-        basic_commands = [
-            BotCommand("start", "Start interacting with the bot"),
-            BotCommand("help", "Show help message"),
-            BotCommand("search", "Search the web for real-time info"),
-            BotCommand("imagine", "Generate an AI image from a prompt"),
-            BotCommand("model", "List or switch AI models")
+        # 1. Set Command Menus via direct HTTP API for absolute reliability
+        url = f'https://api.telegram.org/bot{BOT_TOKEN}/setMyCommands'
+        basic_cmds = [
+            {'command': 'start', 'description': 'Start interacting with the bot'},
+            {'command': 'help', 'description': 'Show help message'},
+            {'command': 'search', 'description': 'Search the web for real-time info'},
+            {'command': 'imagine', 'description': 'Generate an AI image from a prompt'},
+            {'command': 'model', 'description': 'List or switch AI models'}
         ]
-        # Set basic commands as default for everyone
-        await application.bot.set_my_commands(basic_commands, scope=BotCommandScopeDefault())
         
-        if ADMIN_ID:
-            admin_commands = basic_commands + [
-                BotCommand("adduser", "Add a new user (Admin)"),
-                BotCommand("removeuser", "Remove a user (Admin)"),
-                BotCommand("users", "List all authorized users (Admin)")
-            ]
-            # Set admin commands specifically for the Admin's chat
-            await application.bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=ADMIN_ID))
+        try:
+            # Set basic commands for everyone
+            await http_client.post(url, json={'commands': basic_cmds, 'scope': {'type': 'default'}}, timeout=10.0)
             
+            if ADMIN_ID:
+                admin_cmds = basic_cmds + [
+                    {'command': 'adduser', 'description': 'Add a new user (Admin)'},
+                    {'command': 'removeuser', 'description': 'Remove a user (Admin)'},
+                    {'command': 'users', 'description': 'List all authorized users (Admin)'}
+                ]
+                # Set admin commands ONLY for the Admin
+                await http_client.post(url, json={'commands': admin_cmds, 'scope': {'type': 'chat', 'chat_id': ADMIN_ID}}, timeout=10.0)
+        except Exception as e:
+            logger.error(f"Failed to set command menus via HTTP: {e}")
+            
+        if ADMIN_ID:
             # 2. Start Health Check Job (Every 30 minutes)
             application.job_queue.run_repeating(check_models_health, interval=1800, first=10)
             
             # 3. Send Startup Notification
             await application.bot.send_message(
                 chat_id=ADMIN_ID, 
-                text="🚀 **Deployment Successful!**\nNew AI instance is online and routing traffic.", 
+                text="🚀 **Deployment Successful!**\nNew AI instance is online and routing traffic.\n\n*Note: Restart your Telegram app if the command menu doesn't update immediately.*", 
                 parse_mode='Markdown'
             )
             logger.info("Startup setup complete.")
