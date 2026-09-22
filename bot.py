@@ -3,7 +3,8 @@ import httpx
 import asyncio
 import time
 import re
-from telegram import Update
+from telegram import Update, BotCommand
+from telegram.constants import BotCommandScopeDefault, BotCommandScopeChat
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -320,16 +321,17 @@ async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     timer_task = asyncio.create_task(update_timer())
     
     try:
-        response = await http_client.get(image_url, timeout=120.0)
+        response = await http_client.get(image_url, timeout=120.0, follow_redirects=True)
         response.raise_for_status()
+        image_bytes = response.content
         
         timer_task.cancel()
         elapsed_total = int(time.time() - start_time)
             
     except Exception as e:
         timer_task.cancel()
-        logger.error(f"Error generating image (URL len={len(image_url)}): {e}")
-        await status_msg.edit_text("An error occurred while generating the image. Please try again later.")
+        logger.error(f"Error generating image: {e}")
+        await status_msg.edit_text("❌ An error occurred while generating the image. Please try again later.")
         return
 
     try:
@@ -337,14 +339,12 @@ async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         caption_text = f"Prompt: {prompt}"
         if len(caption_text) > 1000:
             caption_text = caption_text[:1000] + "..."
-        await update.message.reply_photo(photo=image_url, caption=caption_text)
-        
-        footer = f"✅ Image generated in {elapsed_total} seconds!"
-        await status_msg.edit_text(footer)
+        await update.message.reply_photo(photo=image_bytes, caption=caption_text)
+        await status_msg.delete()
     except Exception as e:
         logger.error(f"Error sending photo to Telegram: {e}")
         try:
-            await status_msg.edit_text(f"✅ Image generated in {elapsed_total} seconds! (Network took too long to deliver it)")
+            await status_msg.edit_text("❌ Failed to send the image to Telegram. It might be too large.")
         except:
             pass
 
@@ -774,7 +774,12 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE, voice
                 try:
                     await update.message.reply_chat_action("record_voice")
                     spoken_text = _re.sub(r'[*_`~#]', '', reply_text)
-                    communicate = edge_tts.Communicate(spoken_text, 'en-US-AriaNeural')
+                    
+                    voice_name = 'en-US-AriaNeural'
+                    if any('\u0900' <= c <= '\u097f' for c in spoken_text):
+                        voice_name = 'hi-IN-SwaraNeural'
+                        
+                    communicate = edge_tts.Communicate(spoken_text, voice_name)
                     
                     voice_bytes = b""
                     async for chunk in communicate.stream():
@@ -883,16 +888,75 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await status_msg.edit_text("❌ Failed to transcribe the audio.")
 
 # ==========================================
-# Main Application Entry Point
+# Background Tasks & Initialization
 # ==========================================
+async def check_models_health(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Constantly test every model in background and notify admin on failure/recovery."""
+    if not ADMIN_ID:
+        return
+        
+    failed_models = []
+    for model in AVAILABLE_MODELS:
+        base_url, api_key, extra_headers = get_provider_info(model)
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            **extra_headers
+        }
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 5
+        }
+        try:
+            resp = await http_client.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=10.0)
+            resp.raise_for_status()
+        except Exception:
+            failed_models.append(model)
+            
+    if failed_models:
+        failed_str = ", ".join(failed_models)
+        await context.bot.send_message(
+            chat_id=ADMIN_ID, 
+            text=f"⚠️ **Model Health Alert**\nThe following models are currently unresponsive or failing:\n`{failed_str}`",
+            parse_mode='Markdown'
+        )
+
 async def post_init(application: Application) -> None:
-    """Send a notification to the admin when the bot starts up."""
+    """Setup custom command menus and start background tasks."""
     try:
+        # 1. Set Command Menus
+        basic_commands = [
+            BotCommand("start", "Start interacting with the bot"),
+            BotCommand("help", "Show help message"),
+            BotCommand("search", "Search the web for real-time info"),
+            BotCommand("imagine", "Generate an AI image from a prompt"),
+            BotCommand("model", "List or switch AI models")
+        ]
+        # Set basic commands as default for everyone
+        await application.bot.set_my_commands(basic_commands, scope=BotCommandScopeDefault())
+        
         if ADMIN_ID:
-            await application.bot.send_message(chat_id=ADMIN_ID, text="🚀 **Deployment Successful!** New AI instance is online and routing traffic.", parse_mode='Markdown')
-            logger.info("Startup notification sent to Admin.")
+            admin_commands = basic_commands + [
+                BotCommand("adduser", "Add a new user (Admin)"),
+                BotCommand("removeuser", "Remove a user (Admin)"),
+                BotCommand("users", "List all authorized users (Admin)")
+            ]
+            # Set admin commands specifically for the Admin's chat
+            await application.bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(ADMIN_ID))
+            
+            # 2. Start Health Check Job (Every 30 minutes)
+            application.job_queue.run_repeating(check_models_health, interval=1800, first=10)
+            
+            # 3. Send Startup Notification
+            await application.bot.send_message(
+                chat_id=ADMIN_ID, 
+                text="🚀 **Deployment Successful!**\nNew AI instance is online and routing traffic.", 
+                parse_mode='Markdown'
+            )
+            logger.info("Startup setup complete.")
     except Exception as e:
-        logger.error(f"Failed to send startup notification: {e}")
+        logger.error(f"Failed to complete post_init setup: {e}")
 
 def main() -> None:
     if not BOT_TOKEN:
