@@ -520,7 +520,7 @@ async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     enhance_payload = {
         "model": model_to_use,
         "messages": [
-            {"role": "system", "content": "You are an expert AI image prompt engineer and strict safety filter. Your ONLY job is to take a user's simple idea and rewrite it as a single, richly detailed, photorealistic image generation prompt. Include: art style, lighting, camera angle, mood, quality tags. Output ONLY the final prompt text, with NO extra commentary.\n\nCRITICAL SAFETY RULE: You MUST NOT enhance or generate prompts that are 18+, NSFW, sexual, explicitly violent, or contain gore. If the user's request violates this rule, you MUST return exactly and only the string 'NSFW_BLOCKED'."},
+            {"role": "system", "content": "You are an expert AI image prompt engineer and strict safety filter. Your ONLY job is to take a user's simple idea and rewrite it as a single, richly detailed, photorealistic image generation prompt. Include: art style, lighting, camera angle, mood, quality tags. Output ONLY the final prompt text, with NO extra commentary.\n\nCRITICAL SAFETY RULE: You MUST NOT enhance or generate prompts that are 18+, NSFW, sexual, suggestive, or softcore. This includes women in revealing clothing (bikinis, lingerie, cleavage, bare thighs), suggestive poses (bending over, squatting, crawling), or anything intended to be erotic. If the user requests ANY of these, you MUST return exactly and only the string 'NSFW_BLOCKED'."},
             {"role": "user", "content": f"Enhance this prompt: {prompt}"}
         ]
     }
@@ -830,7 +830,14 @@ def detect_nsfw(text: str) -> bool:
         r"\bnsfw\b", r"\b18\+\b", r"\bnude\b", r"\bnaked\b", r"\bporn\b", 
         r"\bsex\b", r"\bsexy\b", r"\berotic\b", r"\bhentai\b", r"\bgore\b",
         r"\bboobs\b", r"\btits\b", r"\bvagina\b", r"\bpenis\b", r"\bdick\b",
-        r"\bexplicit\b", r"\buncensored\b", r"\brule34\b", r"\bbloody\b", r"\bkill\b"
+        r"\bexplicit\b", r"\buncensored\b", r"\brule34\b", r"\bbloody\b", r"\bkill\b",
+        # New softcore/suggestive blocks
+        r"\bbikini\b", r"\bswimsuit\b", r"\blingerie\b", r"\bpanties\b", r"\bunderwear\b",
+        r"\bcleavage\b", r"\bthighs\b", r"\bbarefoot\b", r"\bsuggestive\b", r"\balluring\b",
+        r"\bseducing\b", r"\bseductive\b", r"\bleotard\b", r"\blatex\b", r"\bbdsm\b",
+        r"\bmaid outfit\b", r"\bbusty\b", r"\bthicc\b", r"\bbooty\b", r"\bass\b",
+        r"\bcrouching\b", r"\bsquatting\b", r"\bbending over\b", r"\bcameltoe\b", r"\bsee-through\b",
+        r"\btransparent\b", r"\bskirt\b", r"\bminiskirt\b", r"\bplunging\b", r"\bcrotch\b"
     ]
     
     text_lower = text.lower()
