@@ -852,7 +852,7 @@ async def detect_advanced_jailbreak(text: str) -> bool:
     if len(text.split()) < 3:
         return False # Too short for a complex jailbreak
     try:
-        model_to_use = "llama3-70b-8192"
+        model_to_use = "qwen/qwen3.8-27b"
         base_url, api_key, extra_headers = get_provider_info(model_to_use)
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -882,7 +882,7 @@ async def detect_advanced_nsfw(text: str) -> bool:
     if len(text.split()) < 3:
         return False # Too short for a complex metaphor
     try:
-        model_to_use = "llama3-70b-8192"
+        model_to_use = "qwen/qwen3.8-27b"
         base_url, api_key, extra_headers = get_provider_info(model_to_use)
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -927,7 +927,7 @@ async def check_needs_web_search(query: str) -> bool:
 
     # Ask the LLM
     try:
-        model_to_use = "llama3-70b-8192"
+        model_to_use = "qwen/qwen3.8-27b"
         base_url, api_key, extra_headers = get_provider_info(model_to_use)
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -973,7 +973,7 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE, voice
     active_mode = user_modes.get(user.id, "default")
     
     if active_mode == "study":
-        model_to_use = "llama3-70b-8192"
+        model_to_use = "qwen/qwen3.8-27b"
     elif active_mode == "coder":
         model_to_use = "poolside/laguna-s-2.1"
     elif active_mode == "creative":

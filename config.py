@@ -67,7 +67,7 @@ MODELS = {
     },
 
     # --- Groq (Ultra-fast — activate key at console.groq.com) ---
-    "llama3-70b-8192": {
+    "qwen/qwen3.8-27b": {
         "url": "https://api.groq.com/openai/v1",
         "key": GROQ_API_KEY
     },
