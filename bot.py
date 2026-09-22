@@ -570,12 +570,12 @@ async def check_needs_web_search(query: str) -> bool:
 # ==========================================
 chat_histories = {}
 MAX_HISTORY = 10
-async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE, voice_text: str = None) -> None:
     user = update.effective_user
     if not is_authorized(user.id):
         return
 
-    user_message = update.message.text
+    user_message = voice_text if voice_text else update.message.text
     if not user_message:
         return
         
@@ -866,8 +866,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         # Inject the transcribed text directly into the main chat handler!
         # We flag the context so chat_message knows to reply with Voice (TTS)
         context.user_data['wants_voice_reply'] = True
-        update.message.text = transcription
-        await chat_message(update, context)
+        await chat_message(update, context, voice_text=transcription)
         
     except Exception as e:
         logger.error(f"Voice Transcription Error: {e}")
