@@ -714,10 +714,10 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE, voice
         chat_histories[user.id] = chat_histories[user.id][-MAX_HISTORY:]
         
     system_prompt = {"role": "system", "content": (
-        "You are Astra, an elite AI assistant built on the Hermes intelligence platform. "
+        "You are CogniX, an elite AI assistant built on the Hermes intelligence platform. "
         "You are deployed as a private Telegram bot. "
         "IDENTITY RULES: If anyone asks 'what model are you?', 'who made you?', 'what AI are you?', or any similar identity question, "
-        "you MUST respond with something like: 'I am Astra, a next-generation AI assistant powered by the Hermes intelligence platform. "
+        "you MUST respond with something like: 'I am CogniX, a next-generation AI assistant powered by the Hermes intelligence platform. "
         "I combine multiple frontier AI models with real-time web search and image generation capabilities.' "
         "NEVER reveal the underlying model names (Claude, DeepSeek, Poolside, etc.) or provider names. "
         "NEVER use tool_call, function_call, XML tags, or any structured output — only plain conversational text. "
@@ -769,35 +769,45 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE, voice
             
             formatted_text = parse_markdown_to_html(reply_text)
             
-            if status_msg and not search_failed:
-                try:
-                    await status_msg.edit_text(formatted_text, parse_mode='HTML')
-                except Exception:
-                    await status_msg.edit_text(reply_text)
-            else:
-                try:
-                    await update.message.reply_text(formatted_text, parse_mode='HTML')
-                except Exception:
-                    await update.message.reply_text(reply_text)
             # Voice TTS Reply
             if context.user_data.get('wants_voice_reply', False):
                 try:
                     await update.message.reply_chat_action("record_voice")
-                    # Clean markdown out of the spoken text
                     spoken_text = _re.sub(r'[*_`~#]', '', reply_text)
                     communicate = edge_tts.Communicate(spoken_text, 'en-US-AriaNeural')
                     
-                    # Generate TTS in-memory
                     voice_bytes = b""
                     async for chunk in communicate.stream():
                         if chunk["type"] == "audio":
                             voice_bytes += chunk["data"]
                             
                     await update.message.reply_voice(voice=voice_bytes)
+                    
+                    # Clean up search status message if it exists
+                    if status_msg and not search_failed:
+                        await status_msg.delete()
+                        
                 except Exception as e:
                     logger.error(f"TTS Error: {e}")
+                    # Fallback to text if TTS fails
+                    try:
+                        await update.message.reply_text(formatted_text, parse_mode='HTML')
+                    except Exception:
+                        await update.message.reply_text(reply_text)
                 finally:
                     context.user_data['wants_voice_reply'] = False
+            else:
+                # Normal Text Reply
+                if status_msg and not search_failed:
+                    try:
+                        await status_msg.edit_text(formatted_text, parse_mode='HTML')
+                    except Exception:
+                        await status_msg.edit_text(reply_text)
+                else:
+                    try:
+                        await update.message.reply_text(formatted_text, parse_mode='HTML')
+                    except Exception:
+                        await update.message.reply_text(reply_text)
             
             # Fire image generation AFTER the LLM reply is delivered
             # Use original_user_message to keep the prompt clean (no system notes!)
@@ -861,7 +871,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await status_msg.edit_text("❌ Couldn't hear anything in that audio.")
             return
 
-        await status_msg.edit_text(f'🗣️ "{transcription}"')
+        await status_msg.delete()
         
         # Inject the transcribed text directly into the main chat handler!
         # We flag the context so chat_message knows to reply with Voice (TTS)
