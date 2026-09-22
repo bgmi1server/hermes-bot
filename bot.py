@@ -1194,7 +1194,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         }
         data = {
             'model': 'whisper-large-v3',
-            'response_format': 'json'
+            'response_format': 'json',
+            'prompt': 'This audio is spoken in either English or Hindi. If it is Hindi, output in Devanagari script (नमस्कार, आप कैसे हैं?). Do not use Urdu or Punjabi scripts.'
         }
         
         resp = await http_client.post('https://api.groq.com/openai/v1/audio/transcriptions', headers=headers, files=files, data=data, timeout=30.0)
@@ -1210,7 +1211,11 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         # Inject the transcribed text directly into the main chat handler!
         # We flag the context so chat_message knows to reply with Voice (TTS)
         context.user_data['wants_voice_reply'] = True
-        await chat_message(update, context, voice_text=transcription)
+        
+        # Force the LLM to reply in Hindi if the user spoke in Hindi/Urdu
+        llm_input = transcription + "\n\n[SYSTEM NOTE FOR LLM: The user sent a voice message. If the transcribed text above appears to be Hindi, Urdu, or Punjabi, YOU MUST reply strictly in Hindi (Devanagari script). If it is English, reply in English.]"
+        
+        await chat_message(update, context, voice_text=llm_input)
         
     except Exception as e:
         logger.error(f"Voice Transcription Error: {e}")
