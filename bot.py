@@ -563,7 +563,7 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # ── Auto-detect YouTube URLs ──────────────────────────────────────────
     import re as _re_yt
     yt_pattern = r'(https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)[\w\-]+(?:[\?&][^\s]*)?)'
-    yt_match = _re_yt.search(user_message, _re_yt.IGNORECASE)
+    yt_match = _re_yt.search(yt_pattern, user_message, _re_yt.IGNORECASE)
     if yt_match:
         await summarize_youtube(update, context, yt_match.group(1))
         return
