@@ -374,7 +374,7 @@ async def summarize_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         import re as _re2
 
         # Extract video ID
-        vid_match = _re2.search(r'(?:v=|youtu\.be/)([\w\-]{11})', url)
+        vid_match = _re2.search(r'(?:v=|shorts/|youtu\.be/)([\w\-]{11})', url)
         if not vid_match:
             await status_msg.edit_text("❌ Couldn't extract video ID from that URL.")
             return
@@ -551,7 +551,7 @@ async def check_needs_web_search(query: str) -> bool:
         payload = {
             "model": model_to_use,
             "messages": [
-                {"role": "system", "content": "You are an intent classifier. Determine if the user's message requires real-time web search or recent news (post-2023) to answer accurately. Answer ONLY with YES or NO."},
+                {"role": "system", "content": "You are a web-search intent classifier. Does the user's message require searching the live internet to answer accurately?\nYou MUST answer YES if the user asks about:\n- Recent events, news, or current dates\n- New AI models, products, or software releases (e.g., GPT-5, GPT-6, new iPhones)\n- Live data (weather, sports, stocks)\n- Queries like 'What is the latest...' or 'Do you know about...'\nAnswer ONLY with exactly YES or NO."},
                 {"role": "user", "content": query}
             ],
             "max_tokens": 5,
@@ -627,7 +627,7 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     # ── Auto-detect YouTube URLs ──────────────────────────────────────────
     import re as _re_yt
-    yt_pattern = r'(https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)[\w\-]+(?:[\?&][^\s]*)?)'
+    yt_pattern = r'(https?://(?:www\.)?(?:youtube\.com/(?:watch\?v=|shorts/)|youtu\.be/)[\w\-]{11}(?:[\?&][^\s]*)?)'
     yt_match = _re_yt.search(yt_pattern, user_message, _re_yt.IGNORECASE)
     if yt_match:
         await summarize_youtube(update, context, yt_match.group(1))
