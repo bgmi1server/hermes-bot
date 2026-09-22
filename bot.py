@@ -521,6 +521,51 @@ async def summarize_document(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 # ==========================================
+# Intent Classifier (Smart RAG)
+# ==========================================
+async def check_needs_web_search(query: str) -> bool:
+    """Uses a fast LLM check to decide if a query needs real-time web search."""
+    import re as _re
+    # Fast local rejections to save latency
+    if len(query.split()) < 3 and not "?" in query:
+        return False
+    
+    ignore_phrases = ["hello", "hi", "hey", "how are you", "what are you", "who are you", "thanks", "thank you", "bye"]
+    if any(query.lower().strip('?.,! ') == p for p in ignore_phrases):
+        return False
+
+    is_math = bool(_re.fullmatch(r'^[0-9\s\+\-\*\/\(\)\=\.a-zA-Z]+\??$', query))
+    if is_math and len(query.split()) <= 4:
+        return False
+
+    # Ask the LLM (using the current rotation)
+    try:
+        model_to_use = get_next_model() if current_model == "auto" else current_model
+        base_url, api_key, extra_headers = get_provider_info(model_to_use)
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "HermesTelegramBot/1.0",
+            **extra_headers
+        }
+        payload = {
+            "model": model_to_use,
+            "messages": [
+                {"role": "system", "content": "You are an intent classifier. Determine if the user's message requires real-time web search or recent news (post-2023) to answer accurately. Answer ONLY with YES or NO."},
+                {"role": "user", "content": query}
+            ],
+            "max_tokens": 5,
+            "temperature": 0.0
+        }
+        resp = await http_client.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=5.0)
+        resp.raise_for_status()
+        reply = resp.json()['choices'][0]['message']['content'].strip().upper()
+        return "YES" in reply
+    except Exception as e:
+        logger.error(f"Intent Classifier failed: {e}")
+        return False
+
+# ==========================================
 # Message Handler (Chatting with LLM)
 # ==========================================
 chat_histories = {}
@@ -615,22 +660,17 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     status_msg = None
     
     # Auto-detect if user is asking for facts/news and needs web context
-    search_triggers = ["latest news", "news about", "today", "search for", "look up", "current events", "latest updates"]
     web_context = ""
     search_failed = False
     
-    # Smart heuristics to avoid searching for math, short words, or basic greetings
-    is_math = bool(re.fullmatch(r'^[0-9\s\+\-\*\/\(\)\=\.a-zA-Z]+\??$', user_message)) and len(user_message.split()) <= 4
-    ignore_phrases = ["how are you", "who are you", "what are you", "hello", "hi", "thanks", "thank you", "good morning", "goodnight", "bye"]
-    is_greeting = any(phrase == user_message_lower.strip('?.,! ') for phrase in ignore_phrases)
-    
-    needs_search = not is_math and not is_greeting and any(trigger in user_message_lower for trigger in search_triggers)
+    needs_search = False
+    if not is_image_request:
+        needs_search = await check_needs_web_search(original_user_message)
     
     if needs_search:
-        search_query = re.sub(r'^(what do you say about|what do you know about|what do you think about|do you know about|can you tell me about|tell me about|what is|who is|what\'s|search for|look up|latest|news|today)\s+', '', user_message_lower).strip('?.,!')
-        if not search_query:
-            search_query = user_message.strip('?.,!')
-        logger.info(f"Auto-RAG triggered. Cleaned query: {search_query}")
+        # Ask LLM to extract a clean search query
+        search_query = original_user_message
+        logger.info(f"Auto-RAG triggered for: {search_query}")
         if search_query:
             status_msg = await update.message.reply_text(f"🔍 Searching the web for: '{search_query}'...")
             try:
