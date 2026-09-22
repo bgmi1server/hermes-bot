@@ -37,6 +37,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # Global State
 user_models = {}  # {user_id: model_name}
+user_modes = {}   # {user_id: mode_name}
 maintenance_mode = False
 banned_users = set()
 
@@ -175,6 +176,35 @@ async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text(f"Successfully switched to model: {requested_model}")
     else:
         await update.message.reply_text(f"Invalid model. Please choose 'auto' or from the available models.")
+
+MODES_INFO = {
+    "default": "🤖 Standard AI Assistant",
+    "study": "🎓 Professor (Forces reliable models, detailed explanations)",
+    "coder": "💻 Senior Dev (Forces Poolside model, strict code formatting)",
+    "creative": "🎨 Writer (Forces 70B+ models, highly imaginative)",
+    "concise": "⚡ Quick (Answers in 1-2 sentences)"
+}
+
+async def mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not await check_access(update):
+        return
+
+    user_mode = user_modes.get(user.id, "default")
+    if not context.args:
+        modes_str = "\n".join([f"- `{m}` : {desc}" for m, desc in MODES_INFO.items()])
+        await update.message.reply_text(
+            f"Currently using mode: *{user_mode}*\n\nAvailable modes:\n{modes_str}\n\n"
+            "To switch, use: `/mode <name>`", parse_mode='Markdown'
+        )
+        return
+
+    requested_mode = context.args[0].lower()
+    if requested_mode in MODES_INFO:
+        user_modes[user.id] = requested_mode
+        await update.message.reply_text(f"Successfully switched to mode: *{requested_mode}* {MODES_INFO[requested_mode].split()[0]}", parse_mode='Markdown')
+    else:
+        await update.message.reply_text(f"Invalid mode. Please choose from: {', '.join(MODES_INFO.keys())}")
 
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
@@ -733,7 +763,16 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE, voice
         return
         
     user_model = user_models.get(user.id, DEFAULT_MODEL)
-    model_to_use = get_next_model() if user_model == "auto" else user_model
+    active_mode = user_modes.get(user.id, "default")
+    
+    if active_mode == "study":
+        model_to_use = "llama-3.3-70b-versatile"
+    elif active_mode == "coder":
+        model_to_use = "poolside/laguna-s-2.1"
+    elif active_mode == "creative":
+        model_to_use = "nvidia/nemotron-3-super-120b-a12b:free"
+    else:
+        model_to_use = get_next_model() if user_model == "auto" else user_model
         
     # Check if this is a reply to a generated image (Image modification request)
     if update.message.reply_to_message and update.message.reply_to_message.photo:
@@ -867,17 +906,27 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE, voice
     if len(chat_histories[user.id]) > MAX_HISTORY:
         chat_histories[user.id] = chat_histories[user.id][-MAX_HISTORY:]
         
-    system_prompt = {"role": "system", "content": (
+    base_system = (
         "You are CogniX, an elite AI assistant built on the Hermes intelligence platform. "
         "You are deployed as a private Telegram bot. "
         "IDENTITY RULES: If anyone asks 'what model are you?', 'who made you?', 'what AI are you?', or any similar identity question, "
-        "you MUST respond with something like: 'I am CogniX, a next-generation AI assistant powered by the Hermes intelligence platform. "
-        "I combine multiple frontier AI models with real-time web search and image generation capabilities.' "
-        "NEVER reveal the underlying model names (Claude, DeepSeek, Poolside, etc.) or provider names. "
-        "NEVER use tool_call, function_call, XML tags, or any structured output — only plain conversational text. "
+        "you MUST respond with something like: 'I am CogniX, a next-generation AI assistant powered by the Hermes intelligence platform.' "
+        "NEVER reveal the underlying model names. NEVER use tool_call, function_call, XML tags, or structured output — only plain conversational text. "
         "If real-time web search context is provided, base your answer on it. "
-        "Be sharp, confident, and concise."
-    )}
+    )
+    
+    if active_mode == "study":
+        base_system += "PERSONA: You are a knowledgeable, patient, and highly structured University Professor. Explain concepts step-by-step, use analogies, encourage critical thinking, and format answers beautifully with markdown headers and bullet points."
+    elif active_mode == "coder":
+        base_system += "PERSONA: You are a Senior Software Engineer. Zero fluff. No conversational filler or emojis. Output strictly formatted, highly optimized code blocks. Focus on security, performance, and best practices."
+    elif active_mode == "creative":
+        base_system += "PERSONA: You are an imaginative writer and brainstorming partner. Be highly verbose, creative, and engaging. Use metaphors, avoid strict bullet-point structures, and focus on engaging prose."
+    elif active_mode == "concise":
+        base_system += "PERSONA: You are a rapid-response AI. Be extremely brief. Answer in 1 to 2 sentences MAXIMUM. Get straight to the point."
+    else:
+        base_system += "Be sharp, confident, and concise."
+
+    system_prompt = {"role": "system", "content": base_system}
     
     messages = [system_prompt] + chat_histories[user.id]
     # -------------------------
@@ -1087,7 +1136,8 @@ async def post_init(application: Application) -> None:
             {'command': 'help', 'description': 'Show help message'},
             {'command': 'search', 'description': 'Search the web for real-time info'},
             {'command': 'imagine', 'description': 'Generate an AI image from a prompt'},
-            {'command': 'model', 'description': 'List or switch AI models'}
+            {'command': 'model', 'description': 'List or switch AI models'},
+            {'command': 'mode', 'description': 'Switch between different AI personas and behaviors'}
         ]
         
         try:
@@ -1150,6 +1200,7 @@ def main() -> None:
     application.add_handler(CommandHandler("search", search_command))
     application.add_handler(CommandHandler("imagine", imagine_command))
     application.add_handler(CommandHandler("model", model_command))
+    application.add_handler(CommandHandler("mode", mode_command))
     application.add_handler(CommandHandler("adduser", adduser_command))
     application.add_handler(CommandHandler("removeuser", removeuser_command))
     application.add_handler(CommandHandler("users", users_command))
