@@ -5,3 +5,5 @@ flask
 tavily-python
 youtube-transcript-api
 PyMuPDF
+
+edge-tts

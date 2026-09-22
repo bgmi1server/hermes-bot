@@ -779,6 +779,25 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     await update.message.reply_text(formatted_text, parse_mode='HTML')
                 except Exception:
                     await update.message.reply_text(reply_text)
+            # Voice TTS Reply
+            if context.user_data.get('wants_voice_reply', False):
+                try:
+                    await update.message.reply_chat_action("record_voice")
+                    # Clean markdown out of the spoken text
+                    spoken_text = _re.sub(r'[*_`~#]', '', reply_text)
+                    communicate = edge_tts.Communicate(spoken_text, 'en-US-AriaNeural')
+                    
+                    # Generate TTS in-memory
+                    voice_bytes = b""
+                    async for chunk in communicate.stream():
+                        if chunk["type"] == "audio":
+                            voice_bytes += chunk["data"]
+                            
+                    await update.message.reply_voice(voice=voice_bytes)
+                except Exception as e:
+                    logger.error(f"TTS Error: {e}")
+                finally:
+                    context.user_data['wants_voice_reply'] = False
             
             # Fire image generation AFTER the LLM reply is delivered
             # Use original_user_message to keep the prompt clean (no system notes!)
@@ -803,6 +822,54 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     await status_msg.edit_text(err_msg)
                 else:
                     await update.message.reply_text(err_msg)
+
+# ==========================================
+# Voice Transcription (Whisper) & TTS
+# ==========================================
+import io
+import edge_tts
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not is_authorized(user.id):
+        return
+
+    status_msg = await update.message.reply_text("🎙️ Listening...")
+    try:
+        from config import GROQ_API_KEY
+        if not GROQ_API_KEY:
+            await status_msg.edit_text("❌ Voice transcription requires a GROQ_API_KEY in the config.")
+            return
+
+        file = await context.bot.get_file(update.message.voice.file_id)
+        file_bytes = await file.download_as_bytearray()
+        
+        headers = {'Authorization': f'Bearer {GROQ_API_KEY}'}
+        files = {
+            'file': ('audio.ogg', io.BytesIO(file_bytes), 'audio/ogg'),
+            'model': (None, 'whisper-large-v3'),
+            'response_format': (None, 'json')
+        }
+        
+        resp = await http_client.post('https://api.groq.com/openai/v1/audio/transcriptions', headers=headers, files=files, timeout=30.0)
+        resp.raise_for_status()
+        transcription = resp.json().get('text', '').strip()
+        
+        if not transcription:
+            await status_msg.edit_text("❌ Couldn't hear anything in that audio.")
+            return
+
+        await status_msg.edit_text(f'🗣️ "{transcription}"')
+        
+        # Inject the transcribed text directly into the main chat handler!
+        # We flag the context so chat_message knows to reply with Voice (TTS)
+        context.user_data['wants_voice_reply'] = True
+        update.message.text = transcription
+        await chat_message(update, context)
+        
+    except Exception as e:
+        logger.error(f"Voice Transcription Error: {e}")
+        await status_msg.edit_text("❌ Failed to transcribe the audio.")
 
 # ==========================================
 # Main Application Entry Point
@@ -842,6 +909,7 @@ def main() -> None:
     application.add_handler(CommandHandler("removeuser", removeuser_command))
     application.add_handler(CommandHandler("users", users_command))
     application.add_handler(MessageHandler(filters.Document.ALL, summarize_document))
+    application.add_handler(MessageHandler(filters.VOICE, handle_voice))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat_message))
 
     logger.info("Bot is polling for updates...")
