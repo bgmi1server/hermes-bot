@@ -480,7 +480,11 @@ async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     # ── NSFW Image Guardrail ──────────────────────────────────────────────
-    if detect_nsfw(prompt):
+    is_nsfw = detect_nsfw(prompt)
+    if not is_nsfw:
+        is_nsfw = await detect_advanced_nsfw(prompt)
+
+    if is_nsfw:
         user_strikes[user.id] = user_strikes.get(user.id, 0) + 1
         strike_count = user_strikes[user.id]
         
@@ -565,7 +569,7 @@ async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     encoded_prompt = urllib.parse.quote(enhanced_prompt)
     seed = random.randint(1, 1000000)
-    image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?model=flux-pro&width=1024&height=1024&seed={seed}&nologo=true&enhance=true"
+    image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?model=flux-pro&width=1024&height=1024&seed={seed}&nologo=true&enhance=true&safe=true"
     
     await status_msg.edit_text(f"🎨 Generating HD image... [0s]")
     start_time = time.time()
@@ -864,6 +868,36 @@ async def detect_advanced_jailbreak(text: str) -> bool:
         return "YES" in reply
     except Exception as e:
         logger.error(f"Advanced Jailbreak Detector failed: {e}")
+        return False
+
+async def detect_advanced_nsfw(text: str) -> bool:
+    """Uses a fast LLM to detect subtle/metaphorical NSFW or 18+ requests, even in other languages."""
+    if len(text.split()) < 3:
+        return False # Too short for a complex metaphor
+    try:
+        model_to_use = "qwen/qwen3.8-27b:free"
+        base_url, api_key, extra_headers = get_provider_info(model_to_use)
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "HermesTelegramBot/1.0",
+            **extra_headers
+        }
+        payload = {
+            "model": model_to_use,
+            "messages": [
+                {"role": "system", "content": "You are a strict NSFW and content safety filter. Analyze the user's image generation prompt. Does it contain, imply, or try to sneak in 18+ content, nudity, sexual suggestiveness, gore, extreme violence, or rule34? You must detect metaphors and bypass attempts. Answer ONLY with exactly YES or NO."},
+                {"role": "user", "content": text}
+            ],
+            "max_tokens": 5,
+            "temperature": 0.0
+        }
+        resp = await http_client.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=5.0)
+        resp.raise_for_status()
+        reply = resp.json()['choices'][0]['message']['content'].strip().upper()
+        return "YES" in reply
+    except Exception as e:
+        logger.error(f"Advanced NSFW Detector failed: {e}")
         return False
 
 # ==========================================
