@@ -935,8 +935,10 @@ async def post_init(application: Application) -> None:
         ]
         
         try:
-            # Set basic commands for everyone
-            await http_client.post(url, json={'commands': basic_cmds, 'scope': {'type': 'default'}}, timeout=10.0)
+            # Set basic commands for everyone in private chats (overrides BotFather legacy commands)
+            await http_client.post(url, json={'commands': basic_cmds, 'scope': {'type': 'all_private_chats'}}, timeout=10.0)
+            # Also override for group chats
+            await http_client.post(url, json={'commands': basic_cmds, 'scope': {'type': 'all_group_chats'}}, timeout=10.0)
             
             if ADMIN_ID:
                 admin_cmds = basic_cmds + [
