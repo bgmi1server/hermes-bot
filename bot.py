@@ -1059,10 +1059,10 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE, voice
             if attempt < max_retries - 1:
                 # Rotate to the next model automatically
                 model_to_use = get_next_model()
-                if status_msg:
-                    await status_msg.edit_text(f"⚠️ Model failed, auto-retrying with {model_to_use}...")
-                else:
-                    status_msg = await update.message.reply_text(f"⚠️ Model failed, auto-retrying with {model_to_use}...")
+                # Silently retry to avoid confusing the user with scary warning messages
+                if status_msg and active_mode == "default":
+                    # Only show the retry message if they are in default mode
+                    pass
             else:
                 err_msg = "An error occurred communicating with all AI models. Please try again later."
                 await notify_admin_error(context, "chat_message (All models failed)", e)
