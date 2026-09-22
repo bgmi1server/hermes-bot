@@ -39,27 +39,47 @@ import json
 import os
 
 # ==========================================
-# Dynamic User Management
+# Dynamic User Management (GitHub Issue DB)
 # ==========================================
-USERS_FILE = "authorized_users.json"
+import urllib.request
+import urllib.error
 
 def _load_authorized_users() -> set:
-    """Load dynamically added users from disk."""
+    """Load dynamically added users from GitHub Issue #1 (Free DB)."""
     try:
-        if os.path.exists(USERS_FILE):
-            with open(USERS_FILE, "r") as f:
-                return set(json.load(f))
-    except Exception:
-        pass
+        from config import GITHUB_PAT
+        if not GITHUB_PAT:
+            return set()
+        req = urllib.request.Request("https://api.github.com/repos/bgmi1server/hermes-bot/issues/1")
+        req.add_header("Authorization", f"token {GITHUB_PAT}")
+        req.add_header("Accept", "application/vnd.github.v3+json")
+        req.add_header("User-Agent", "HermesBot")
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
+            body_json = json.loads(data.get("body", '{"users": []}'))
+            return set(body_json.get("users", []))
+    except Exception as e:
+        logger.error(f"Failed to load users from GitHub: {e}")
     return set()
 
 def _save_authorized_users() -> None:
-    """Persist the current dynamic user set to disk."""
+    """Persist the current dynamic user set to GitHub Issue #1."""
     try:
-        with open(USERS_FILE, "w") as f:
-            json.dump(list(authorized_users), f)
+        from config import GITHUB_PAT
+        if not GITHUB_PAT:
+            return
+        
+        body_content = json.dumps({"users": list(authorized_users - set(GUEST_IDS))})
+        payload = json.dumps({"body": body_content}).encode('utf-8')
+        
+        req = urllib.request.Request("https://api.github.com/repos/bgmi1server/hermes-bot/issues/1", data=payload, method="PATCH")
+        req.add_header("Authorization", f"token {GITHUB_PAT}")
+        req.add_header("Accept", "application/vnd.github.v3+json")
+        req.add_header("User-Agent", "HermesBot")
+        with urllib.request.urlopen(req, timeout=10) as response:
+            pass
     except Exception as e:
-        logger.error(f"Failed to save authorized users: {e}")
+        logger.error(f"Failed to save users to GitHub: {e}")
 
 # In-memory set: base GUEST_IDS from config + dynamically added users
 authorized_users: set = set(GUEST_IDS) | _load_authorized_users()

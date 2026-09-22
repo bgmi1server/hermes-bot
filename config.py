@@ -9,6 +9,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 _guest_ids_raw = os.environ.get("GUEST_IDS", "")
 GUEST_IDS = [int(gid.strip()) for gid in _guest_ids_raw.split(",") if gid.strip().isdigit()]
+GITHUB_PAT = os.environ.get("GITHUB_PAT", "")
 
 # ==================================
 # API Credentials
