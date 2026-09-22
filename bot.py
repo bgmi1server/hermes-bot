@@ -3,11 +3,12 @@ import httpx
 import asyncio
 import time
 import re
-from telegram import Update, BotCommand, BotCommandScopeDefault, BotCommandScopeChat
+from telegram import Update, BotCommand, BotCommandScopeDefault, BotCommandScopeChat, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     filters,
     ContextTypes,
 )
@@ -191,11 +192,18 @@ async def mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     user_mode = user_modes.get(user.id, "default")
+    
     if not context.args:
-        modes_str = "\n".join([f"- `{m}` : {desc}" for m, desc in MODES_INFO.items()])
+        # Build inline keyboard for modes
+        keyboard = []
+        for m, desc in MODES_INFO.items():
+            keyboard.append([InlineKeyboardButton(f"{desc.split()[0]} {m.capitalize()}", callback_data=f"mode_{m}")])
+            
+        reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
-            f"Currently using mode: *{user_mode}*\n\nAvailable modes:\n{modes_str}\n\n"
-            "To switch, use: `/mode <name>`", parse_mode='Markdown'
+            f"Currently using mode: *{user_mode}*\n\nSelect a new mode below:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
         )
         return
 
@@ -205,6 +213,24 @@ async def mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(f"Successfully switched to mode: *{requested_mode}* {MODES_INFO[requested_mode].split()[0]}", parse_mode='Markdown')
     else:
         await update.message.reply_text(f"Invalid mode. Please choose from: {', '.join(MODES_INFO.keys())}")
+
+async def mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    user = query.from_user
+    
+    if user.id not in authorized_users and user.id != ADMIN_ID:
+        await query.answer("Unauthorized.", show_alert=True)
+        return
+        
+    await query.answer()
+    
+    requested_mode = query.data.replace("mode_", "")
+    if requested_mode in MODES_INFO:
+        user_modes[user.id] = requested_mode
+        await query.edit_message_text(
+            f"Successfully switched to mode: *{requested_mode}* {MODES_INFO[requested_mode].split()[0]}",
+            parse_mode='Markdown'
+        )
 
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
@@ -1211,6 +1237,7 @@ def main() -> None:
     application.add_handler(CommandHandler("maintenance", maintenance_command))
     application.add_handler(CommandHandler("ban", ban_command))
     application.add_handler(CommandHandler("unban", unban_command))
+    application.add_handler(CallbackQueryHandler(mode_callback, pattern='^mode_'))
     application.add_handler(MessageHandler(filters.Document.ALL, summarize_document))
     application.add_handler(MessageHandler(filters.VOICE, handle_voice))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat_message))
