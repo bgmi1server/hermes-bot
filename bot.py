@@ -846,12 +846,14 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         
         headers = {'Authorization': f'Bearer {GROQ_API_KEY}'}
         files = {
-            'file': ('audio.ogg', io.BytesIO(file_bytes), 'audio/ogg'),
-            'model': (None, 'whisper-large-v3'),
-            'response_format': (None, 'json')
+            'file': ('audio.ogg', io.BytesIO(file_bytes), 'audio/ogg')
+        }
+        data = {
+            'model': 'whisper-large-v3',
+            'response_format': 'json'
         }
         
-        resp = await http_client.post('https://api.groq.com/openai/v1/audio/transcriptions', headers=headers, files=files, timeout=30.0)
+        resp = await http_client.post('https://api.groq.com/openai/v1/audio/transcriptions', headers=headers, files=files, data=data, timeout=30.0)
         resp.raise_for_status()
         transcription = resp.json().get('text', '').strip()
         
