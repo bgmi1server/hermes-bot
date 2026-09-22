@@ -807,7 +807,7 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE, voice
     active_mode = user_modes.get(user.id, "default")
     
     if active_mode == "study":
-        model_to_use = "llama-3.3-70b-versatile"
+        model_to_use = "llama3-70b-8192"
     elif active_mode == "coder":
         model_to_use = "poolside/laguna-s-2.1"
     elif active_mode == "creative":
