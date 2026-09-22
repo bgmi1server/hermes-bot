@@ -3,8 +3,7 @@ import httpx
 import asyncio
 import time
 import re
-from telegram import Update, BotCommand
-from telegram.constants import BotCommandScopeDefault, BotCommandScopeChat
+from telegram import Update, BotCommand, BotCommandScopeDefault, BotCommandScopeChat
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
