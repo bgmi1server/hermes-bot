@@ -34,11 +34,37 @@ current_model = DEFAULT_MODEL
 # Global HTTP client for connection pooling (speeds up requests)
 http_client = httpx.AsyncClient(timeout=120.0)
 
+import json
+import os
+
 # ==========================================
-# Role-Based Access Control (RBAC)
+# Dynamic User Management
 # ==========================================
+USERS_FILE = "authorized_users.json"
+
+def _load_authorized_users() -> set:
+    """Load dynamically added users from disk."""
+    try:
+        if os.path.exists(USERS_FILE):
+            with open(USERS_FILE, "r") as f:
+                return set(json.load(f))
+    except Exception:
+        pass
+    return set()
+
+def _save_authorized_users() -> None:
+    """Persist the current dynamic user set to disk."""
+    try:
+        with open(USERS_FILE, "w") as f:
+            json.dump(list(authorized_users), f)
+    except Exception as e:
+        logger.error(f"Failed to save authorized users: {e}")
+
+# In-memory set: base GUEST_IDS from config + dynamically added users
+authorized_users: set = set(GUEST_IDS) | _load_authorized_users()
+
 def is_authorized(user_id: int) -> bool:
-    return user_id == ADMIN_ID or user_id in GUEST_IDS
+    return user_id == ADMIN_ID or user_id in authorized_users
 
 # ==========================================
 # Command Handlers
@@ -127,6 +153,65 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception as e:
         logger.error(f"Error during DuckDuckGo search: {e}")
         await update.message.reply_text("An error occurred while searching. Please try again later.")
+
+# ==========================================
+# User Management Commands (Admin only)
+# ==========================================
+async def adduser_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ This command is for admins only.")
+        return
+
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Usage: /adduser <telegram_user_id>")
+        return
+
+    new_id = int(context.args[0])
+    if new_id in authorized_users:
+        await update.message.reply_text(f"✅ User `{new_id}` is already authorized.", parse_mode='Markdown')
+        return
+
+    authorized_users.add(new_id)
+    _save_authorized_users()
+    await update.message.reply_text(f"✅ User `{new_id}` has been added and can now use the bot.", parse_mode='Markdown')
+    logger.info(f"Admin added user {new_id}")
+
+async def removeuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ This command is for admins only.")
+        return
+
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Usage: /removeuser <telegram_user_id>")
+        return
+
+    rem_id = int(context.args[0])
+    if rem_id not in authorized_users:
+        await update.message.reply_text(f"⚠️ User `{rem_id}` is not in the authorized list.", parse_mode='Markdown')
+        return
+
+    authorized_users.discard(rem_id)
+    _save_authorized_users()
+    await update.message.reply_text(f"🚫 User `{rem_id}` has been removed.", parse_mode='Markdown')
+    logger.info(f"Admin removed user {rem_id}")
+
+async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ This command is for admins only.")
+        return
+
+    if not authorized_users:
+        await update.message.reply_text("No guest users authorized yet. Use /adduser <id> to add one.")
+        return
+
+    user_list = "\n".join([f"• `{uid}`" for uid in sorted(authorized_users)])
+    await update.message.reply_text(
+        f"👥 *Authorized Users* ({len(authorized_users)} total)\n\n{user_list}",
+        parse_mode='Markdown'
+    )
 
 
 async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -243,6 +328,167 @@ def parse_markdown_to_html(text):
     return text
 
 # ==========================================
+# YouTube Summarizer
+# ==========================================
+async def summarize_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
+    """Auto-triggered when a YouTube URL is detected in a message."""
+    if not is_authorized(update.effective_user.id):
+        return
+
+    status_msg = await update.message.reply_text("🎬 Fetching video transcript...")
+
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
+        import re as _re2
+
+        # Extract video ID
+        vid_match = _re2.search(r'(?:v=|youtu\.be/)([\w\-]{11})', url)
+        if not vid_match:
+            await status_msg.edit_text("❌ Couldn't extract video ID from that URL.")
+            return
+
+        video_id = vid_match.group(1)
+
+        # Fetch transcript
+        try:
+            transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+        except (NoTranscriptFound, TranscriptsDisabled):
+            await status_msg.edit_text("❌ This video doesn't have a transcript available. Try a different video.")
+            return
+
+        # Join transcript text and cap at 12,000 chars to avoid LLM overflow
+        full_text = " ".join([t['text'] for t in transcript_list])
+        if len(full_text) > 12000:
+            full_text = full_text[:12000] + "..."
+
+        await status_msg.edit_text("🧠 Summarizing...")
+
+        # Ask the LLM to summarize
+        model_to_use = get_next_model() if current_model == "auto" else current_model
+        base_url, api_key, extra_headers = get_provider_info(model_to_use)
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "HermesTelegramBot/1.0",
+            **extra_headers
+        }
+        payload = {
+            "model": model_to_use,
+            "messages": [
+                {"role": "system", "content": "You are an expert at summarizing YouTube video transcripts. Create a concise, well-structured summary with: a bold title, key points as bullet points, and a brief conclusion. Be clear and informative."},
+                {"role": "user", "content": f"Summarize this YouTube video transcript:\n\n{full_text}"}
+            ]
+        }
+        resp = await http_client.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=60.0)
+        resp.raise_for_status()
+        summary = resp.json()['choices'][0]['message']['content'].strip()
+        formatted = parse_markdown_to_html(summary)
+
+        await status_msg.delete()
+        try:
+            await update.message.reply_text(f"🎬 <b>YouTube Summary</b>\n🔗 {url}\n\n{formatted}", parse_mode='HTML')
+        except Exception:
+            await update.message.reply_text(f"🎬 YouTube Summary\n🔗 {url}\n\n{summary}")
+
+    except ImportError:
+        await status_msg.edit_text("❌ YouTube transcript library not installed. Run: pip install youtube-transcript-api")
+    except Exception as e:
+        logger.error(f"YouTube summarizer error: {e}")
+        await status_msg.edit_text("❌ Failed to summarize this video. It may be unavailable or region-locked.")
+
+
+# ==========================================
+# Document Summarizer
+# ==========================================
+async def summarize_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Triggered when user sends any document/file to the bot."""
+    user = update.effective_user
+    if not is_authorized(user.id):
+        return
+
+    doc = update.message.document
+    file_name = doc.file_name or "document"
+    mime_type = doc.mime_type or ""
+
+    # Supported types
+    supported_ext = ['.txt', '.md', '.py', '.js', '.csv', '.json', '.html', '.pdf']
+    is_supported = any(file_name.lower().endswith(ext) for ext in supported_ext) or 'text' in mime_type or 'pdf' in mime_type
+
+    if not is_supported:
+        await update.message.reply_text(
+            f"📎 I can't read *{file_name}* — I support: PDF, TXT, MD, PY, JS, CSV, JSON, HTML.\nSend one of those for a summary!",
+            parse_mode='Markdown'
+        )
+        return
+
+    status_msg = await update.message.reply_text(f"📄 Reading *{file_name}*...", parse_mode='Markdown')
+
+    try:
+        # Download the file
+        tg_file = await context.bot.get_file(doc.file_id)
+        file_bytes = await tg_file.download_as_bytearray()
+
+        # Extract text
+        extracted_text = ""
+        if file_name.lower().endswith('.pdf') or 'pdf' in mime_type:
+            try:
+                import fitz  # PyMuPDF
+                pdf_doc = fitz.open(stream=bytes(file_bytes), filetype="pdf")
+                extracted_text = "\n".join([page.get_text() for page in pdf_doc])
+            except ImportError:
+                await status_msg.edit_text("❌ PDF support not installed. Run: pip install PyMuPDF")
+                return
+        else:
+            # Text-based file — decode it
+            for enc in ['utf-8', 'latin-1', 'cp1252']:
+                try:
+                    extracted_text = file_bytes.decode(enc)
+                    break
+                except UnicodeDecodeError:
+                    continue
+
+        if not extracted_text.strip():
+            await status_msg.edit_text("❌ Couldn't extract any text from that file.")
+            return
+
+        # Cap at 15,000 chars
+        if len(extracted_text) > 15000:
+            extracted_text = extracted_text[:15000] + "\n\n[... content truncated ...]"
+
+        await status_msg.edit_text(f"🧠 Summarizing *{file_name}*...", parse_mode='Markdown')
+
+        model_to_use = get_next_model() if current_model == "auto" else current_model
+        base_url, api_key, extra_headers = get_provider_info(model_to_use)
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "HermesTelegramBot/1.0",
+            **extra_headers
+        }
+        payload = {
+            "model": model_to_use,
+            "messages": [
+                {"role": "system", "content": "You are an expert document analyst. Summarize the provided document with: a bold title, key points as bullet points, and a brief conclusion. Be concise and accurate."},
+                {"role": "user", "content": f"Summarize this document ({file_name}):\n\n{extracted_text}"}
+            ]
+        }
+        resp = await http_client.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=60.0)
+        resp.raise_for_status()
+        summary = resp.json()['choices'][0]['message']['content'].strip()
+        formatted = parse_markdown_to_html(summary)
+
+        await status_msg.delete()
+        try:
+            await update.message.reply_text(f"📄 <b>Summary: {file_name}</b>\n\n{formatted}", parse_mode='HTML')
+        except Exception:
+            await update.message.reply_text(f"📄 Summary: {file_name}\n\n{summary}")
+
+    except Exception as e:
+        logger.error(f"Document summarizer error: {e}")
+        await status_msg.edit_text("❌ An error occurred while reading your document. Please try again.")
+
+
+# ==========================================
 # Message Handler (Chatting with LLM)
 # ==========================================
 chat_histories = {}
@@ -301,6 +547,16 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Store original message BEFORE appending any system notes
     original_user_message = user_message
     user_message_lower = user_message.lower()
+
+    # ── Auto-detect YouTube URLs ──────────────────────────────────────────
+    import re as _re_yt
+    yt_pattern = r'(https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)[\w\-]+(?:[\?&][^\s]*)?)'
+    yt_match = _re_yt.search(user_message, _re_yt.IGNORECASE)
+    if yt_match:
+        await summarize_youtube(update, context, yt_match.group(1))
+        return
+    # ─────────────────────────────────────────────────────────────────────
+
     # Auto-detect if the user is asking for an image
     # Smart combo detection: any action word + any image word = image request
     image_action_words = ["generate", "create", "make", "draw", "design", "produce", "show", "give", "build", "craft", "paint", "render", "imagine", "visualize"]
@@ -510,6 +766,10 @@ def main() -> None:
     application.add_handler(CommandHandler("search", search_command))
     application.add_handler(CommandHandler("imagine", imagine_command))
     application.add_handler(CommandHandler("model", model_command))
+    application.add_handler(CommandHandler("adduser", adduser_command))
+    application.add_handler(CommandHandler("removeuser", removeuser_command))
+    application.add_handler(CommandHandler("users", users_command))
+    application.add_handler(MessageHandler(filters.Document.ALL, summarize_document))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat_message))
 
     logger.info("Bot is polling for updates...")
