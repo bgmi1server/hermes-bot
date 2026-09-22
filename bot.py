@@ -2,6 +2,7 @@ import logging
 import httpx
 import asyncio
 import time
+import re
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -135,23 +136,34 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_chat_action("typing")
     
     try:
-        results = []
-        with DDGS() as ddgs:
-            search_results = ddgs.text(query, max_results=3)
-            for result in search_results:
-                title = result.get('title', 'No Title')
-                href = result.get('href', 'No URL')
-                body = result.get('body', 'No snippet available.')
-                results.append(f"🔹 {title}\n🔗 {href}\n📝 {body}")
+        tavily_payload = {
+            "api_key": TAVILY_API_KEY,
+            "query": query,
+            "search_depth": "basic",
+            "include_answer": False,
+            "max_results": 3
+        }
+        resp = await http_client.post("https://api.tavily.com/search", json=tavily_payload, timeout=10.0)
+        resp.raise_for_status()
+        
+        data = resp.json()
+        results = data.get('results', [])
         
         if results:
-            response_text = f"Search results for '{query}':\n\n" + "\n\n".join(results)
+            formatted_results = []
+            for r in results:
+                title = r.get('title', 'No Title')
+                url = r.get('url', 'No URL')
+                content = r.get('content', 'No snippet available.')
+                formatted_results.append(f"🔹 {title}\n🔗 {url}\n📝 {content}")
+                
+            response_text = f"Search results for '{query}':\n\n" + "\n\n".join(formatted_results)
             await update.message.reply_text(response_text)
         else:
             await update.message.reply_text("No results found for your query.")
             
     except Exception as e:
-        logger.error(f"Error during DuckDuckGo search: {e}")
+        logger.error(f"Error during Tavily search: {e}")
         await update.message.reply_text("An error occurred while searching. Please try again later.")
 
 # ==========================================
