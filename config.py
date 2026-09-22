@@ -12,47 +12,63 @@ GUEST_IDS = []  # List of guest IDs
 # ==================================
 # API Credentials
 # ==================================
-VYCE_API_KEYS = [
-    os.environ.get("VYCE_API_KEY_1", ""),
-    os.environ.get("VYCE_API_KEY_2", "")
-]
-VYCE_API_KEYS = [k for k in VYCE_API_KEYS if k] # Filter empty
-key_iterator = itertools.cycle(VYCE_API_KEYS) if VYCE_API_KEYS else None
-
-def get_vyce_key():
-    return next(key_iterator) if key_iterator else ""
-
-HCNSEC_API_KEY = os.environ.get("HCNSEC_API_KEY", "")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 
-# Poolside AI — Round-robin across multiple keys
+# Poolside AI — Round-robin across multiple keys (direct API)
 POOLSIDE_API_KEYS = [
     os.environ.get("POOLSIDE_API_KEY_1", ""),
     os.environ.get("POOLSIDE_API_KEY_2", "")
 ]
-POOLSIDE_API_KEYS = [k for k in POOLSIDE_API_KEYS if k]  # Filter empty
+POOLSIDE_API_KEYS = [k for k in POOLSIDE_API_KEYS if k]
 poolside_key_iterator = itertools.cycle(POOLSIDE_API_KEYS) if POOLSIDE_API_KEYS else None
 
 def get_poolside_key():
     return next(poolside_key_iterator) if poolside_key_iterator else ""
 
+# OpenRouter — single key, routes to many free models
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+
+# Groq — ultra-fast inference (activate key on console.groq.com first)
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+
 # ==================================
 # Model Routing Registry
+# Only VERIFIED ALIVE models are listed here.
 # ==================================
 MODELS = {
-    # Poolside AI Models (Round-robin keys)
-    "poolside/laguna-s-2.1": {"url": "https://inference.poolside.ai/v1", "key_func": get_poolside_key},
-    "poolside/laguna-xs-2.1": {"url": "https://inference.poolside.ai/v1", "key_func": get_poolside_key},
+    # --- Poolside AI (Direct, Round-Robin Keys) ---
+    "poolside/laguna-s-2.1": {
+        "url": "https://inference.poolside.ai/v1",
+        "key_func": get_poolside_key
+    },
+    "poolside/laguna-xs-2.1": {
+        "url": "https://inference.poolside.ai/v1",
+        "key_func": get_poolside_key
+    },
 
-    # VyceAI Models (Uses round-robin keys)
-    "claude-sonnet-4-6": {"url": "https://vyceai.com/v1", "key_func": get_vyce_key},
-    "agnes-3.0-flash": {"url": "https://vyceai.com/v1", "key_func": get_vyce_key},
-    
-    # HCNSec Models (Verified Active)
-    "DeepSeek-V4.1-Flash": {"url": "https://api.hcnsec.cn/v1", "key": HCNSEC_API_KEY},
-    "kimi-k3": {"url": "https://api.hcnsec.cn/v1", "key": HCNSEC_API_KEY},
-    "step-3.7-flash": {"url": "https://api.hcnsec.cn/v1", "key": HCNSEC_API_KEY},
-    "Qwen3.8-27B": {"url": "https://api.hcnsec.cn/v1", "key": HCNSEC_API_KEY}
+    # --- OpenRouter Free Models ---
+    "nvidia/nemotron-3-super-120b-a12b:free": {
+        "url": "https://openrouter.ai/api/v1",
+        "key": OPENROUTER_API_KEY,
+        "extra_headers": {
+            "HTTP-Referer": "https://hermes-bot.onrender.com",
+            "X-Title": "Hermes Telegram Bot"
+        }
+    },
+    "qwen/qwen3.8-27b:free": {
+        "url": "https://openrouter.ai/api/v1",
+        "key": OPENROUTER_API_KEY,
+        "extra_headers": {
+            "HTTP-Referer": "https://hermes-bot.onrender.com",
+            "X-Title": "Hermes Telegram Bot"
+        }
+    },
+
+    # --- Groq (Ultra-fast — activate key at console.groq.com) ---
+    "llama-3.3-70b-versatile": {
+        "url": "https://api.groq.com/openai/v1",
+        "key": GROQ_API_KEY
+    },
 }
 
 AVAILABLE_MODELS = list(MODELS.keys())
@@ -65,12 +81,8 @@ def get_next_model():
     return next(model_iterator)
 
 def get_provider_info(model_name):
-    """Returns the (base_url, api_key) for the requested model."""
-    info = MODELS[model_name]
-    if "key_func" in info:
-        return info["url"], info["key_func"]()
-    return info["url"], info["key"]
-
-def get_image_provider_info():
-    """Returns the credentials specifically for grok-imagine-2."""
-    return "https://vyceai.com/v1", get_vyce_key()
+    """Returns the (base_url, api_key, extra_headers) for the requested model."""
+    info = MODELS.get(model_name, list(MODELS.values())[0])
+    key = info["key_func"]() if "key_func" in info else info.get("key", "")
+    extra_headers = info.get("extra_headers", {})
+    return info["url"], key, extra_headers

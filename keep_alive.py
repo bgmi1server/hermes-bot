@@ -333,6 +333,24 @@ def run():
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
 
+def self_ping():
+    """Ping our own URL every 10 minutes to prevent Render from spinning down."""
+    import time, urllib.request
+    render_url = os.environ.get("RENDER_EXTERNAL_URL", "")
+    if not render_url:
+        return
+    while True:
+        time.sleep(600)  # 10 minutes
+        try:
+            urllib.request.urlopen(render_url, timeout=10)
+        except Exception:
+            pass  # Silently ignore ping failures
+
 def keep_alive():
-    t = Thread(target=run)
-    t.start()
+    server_thread = Thread(target=run)
+    server_thread.daemon = True
+    server_thread.start()
+
+    ping_thread = Thread(target=self_ping)
+    ping_thread.daemon = True
+    ping_thread.start()

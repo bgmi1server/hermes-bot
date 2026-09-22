@@ -13,7 +13,7 @@ from telegram.ext import (
 try:
     from config import (
         BOT_TOKEN, ADMIN_ID, GUEST_IDS,
-        get_provider_info, get_image_provider_info, get_next_model,
+        get_provider_info, get_next_model,
         AVAILABLE_MODELS, DEFAULT_MODEL, TAVILY_API_KEY
     )
 except ImportError:
@@ -144,11 +144,12 @@ async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     # --- Step 1: AI Prompt Enhancement ---
     model_to_use = get_next_model() if current_model == "auto" else current_model
-    base_url, api_key = get_provider_info(model_to_use)
+    base_url, api_key, extra_headers = get_provider_info(model_to_use)
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "User-Agent": "HermesTelegramBot/1.0"
+        "User-Agent": "HermesTelegramBot/1.0",
+        **extra_headers
     }
     enhance_payload = {
         "model": model_to_use,
@@ -264,10 +265,11 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             original_prompt = old_caption[8:]
             
             status_msg = await update.message.reply_text("🧠 Merging prompts...")
-            base_url, api_key = get_provider_info(model_to_use)
+            base_url, api_key, extra_headers = get_provider_info(model_to_use)
             headers = {
                 "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
+                **extra_headers
             }
             
             rewrite_payload = {
@@ -400,11 +402,12 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     max_retries = 3
     for attempt in range(max_retries):
-        base_url, api_key = get_provider_info(model_to_use)
+        base_url, api_key, extra_headers = get_provider_info(model_to_use)
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
-            "User-Agent": "HermesTelegramBot/1.0"
+            "User-Agent": "HermesTelegramBot/1.0",
+            **extra_headers
         }
         
         payload = {
