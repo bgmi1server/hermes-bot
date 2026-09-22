@@ -479,6 +479,28 @@ async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text("Please provide a prompt. Usage: /imagine <your prompt>")
         return
 
+    # ── NSFW Image Guardrail ──────────────────────────────────────────────
+    if detect_nsfw(prompt):
+        user_strikes[user.id] = user_strikes.get(user.id, 0) + 1
+        strike_count = user_strikes[user.id]
+        
+        logger.warning(f"NSFW image request blocked from User {user.id}. Strike: {strike_count}/3")
+        
+        if strike_count >= 3:
+            banned_users.add(user.id)
+            if user.id in authorized_users:
+                authorized_users.remove(user.id)
+            _save_authorized_users()
+            
+            await update.message.reply_text("⛔ **ACCOUNT TERMINATED:** You have been permanently banned for repeated security and safety violations.")
+            await notify_admin_error(context, "Auto-Ban Triggered (NSFW)", Exception(f"User {user.id} ({user.username}) was automatically banned for 3 NSFW image requests."))
+            return
+        else:
+            await update.message.reply_text(f"🛑 **Safety Alert:** NSFW/18+ content is strictly prohibited. This request has been blocked. This is **Strike {strike_count}/3**. Further attempts will result in a permanent ban.")
+            await notify_admin_error(context, f"NSFW Strike {strike_count}", Exception(f"User {user.id} ({user.username}) requested: {prompt[:100]}"))
+            return
+    # ─────────────────────────────────────────────────────────────────────
+
     status_msg = await update.message.reply_text(f"✨ Enhancing your prompt with AI...")
     
     # --- Step 1: AI Prompt Enhancement ---
@@ -494,7 +516,7 @@ async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     enhance_payload = {
         "model": model_to_use,
         "messages": [
-            {"role": "system", "content": "You are an expert AI image prompt engineer. Your ONLY job is to take a user's simple idea and rewrite it as a single, richly detailed, photorealistic image generation prompt. Include: art style, lighting, camera angle, mood, quality tags (e.g. 8K, ultra-detailed, cinematic). Output ONLY the final prompt text, with NO extra commentary, NO quotes, NO labels."},
+            {"role": "system", "content": "You are an expert AI image prompt engineer and strict safety filter. Your ONLY job is to take a user's simple idea and rewrite it as a single, richly detailed, photorealistic image generation prompt. Include: art style, lighting, camera angle, mood, quality tags. Output ONLY the final prompt text, with NO extra commentary.\n\nCRITICAL SAFETY RULE: You MUST NOT enhance or generate prompts that are 18+, NSFW, sexual, explicitly violent, or contain gore. If the user's request violates this rule, you MUST return exactly and only the string 'NSFW_BLOCKED'."},
             {"role": "user", "content": f"Enhance this prompt: {prompt}"}
         ]
     }
@@ -510,6 +532,26 @@ async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         enhance_resp.raise_for_status()
         enhanced_prompt = enhance_resp.json()['choices'][0]['message']['content'].strip()
         logger.info(f"Prompt enhanced: {enhanced_prompt}")
+        
+        # ── Layer 2 NSFW AI Filter ───────────────────────────────────────────
+        if "NSFW_BLOCKED" in enhanced_prompt.upper():
+            user_strikes[user.id] = user_strikes.get(user.id, 0) + 1
+            strike_count = user_strikes[user.id]
+            logger.warning(f"AI NSFW Guard triggered for User {user.id}. Strike: {strike_count}/3")
+            
+            if strike_count >= 3:
+                banned_users.add(user.id)
+                if user.id in authorized_users:
+                    authorized_users.remove(user.id)
+                _save_authorized_users()
+                await update.message.reply_text("⛔ **ACCOUNT TERMINATED:** You have been permanently banned for repeated security and safety violations.")
+                await notify_admin_error(context, "Auto-Ban Triggered (AI-NSFW)", Exception(f"User {user.id} ({user.username}) was automatically banned for 3 NSFW image requests."))
+                return
+            else:
+                await update.message.reply_text(f"🛑 **Safety Alert:** The AI detected explicit/18+ intent in your prompt. This is **Strike {strike_count}/3**. Further attempts will result in a permanent ban.")
+                await notify_admin_error(context, f"AI-NSFW Strike {strike_count}", Exception(f"User {user.id} ({user.username}) requested: {prompt[:100]}"))
+                return
+        # ─────────────────────────────────────────────────────────────────────
     except Exception as e:
         logger.warning(f"Prompt enhancement failed, using original: {e}")
 
@@ -770,6 +812,25 @@ def detect_jailbreak(text: str) -> bool:
     
     text_lower = text.lower()
     for pattern in jailbreak_patterns:
+        if re.search(pattern, text_lower):
+            return True
+            
+    return False
+
+def detect_nsfw(text: str) -> bool:
+    """Heuristic check to detect 18+, NSFW, or explicit content requests."""
+    if not text:
+        return False
+        
+    nsfw_words = [
+        r"\bnsfw\b", r"\b18\+\b", r"\bnude\b", r"\bnaked\b", r"\bporn\b", 
+        r"\bsex\b", r"\bsexy\b", r"\berotic\b", r"\bhentai\b", r"\bgore\b",
+        r"\bboobs\b", r"\btits\b", r"\bvagina\b", r"\bpenis\b", r"\bdick\b",
+        r"\bexplicit\b", r"\buncensored\b", r"\brule34\b", r"\bbloody\b", r"\bkill\b"
+    ]
+    
+    text_lower = text.lower()
+    for pattern in nsfw_words:
         if re.search(pattern, text_lower):
             return True
             
