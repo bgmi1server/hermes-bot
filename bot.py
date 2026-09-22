@@ -942,7 +942,7 @@ async def post_init(application: Application) -> None:
                 BotCommand("users", "List all authorized users (Admin)")
             ]
             # Set admin commands specifically for the Admin's chat
-            await application.bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(ADMIN_ID))
+            await application.bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=ADMIN_ID))
             
             # 2. Start Health Check Job (Every 30 minutes)
             application.job_queue.run_repeating(check_models_health, interval=1800, first=10)
