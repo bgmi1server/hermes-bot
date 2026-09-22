@@ -116,6 +116,21 @@ async def check_access(update: Update) -> bool:
 # ==========================================
 # Command Handlers
 # ==========================================
+async def send_long_message(update: Update, text: str, status_msg=None, parse_mode=None):
+    """Safely split and send messages that exceed Telegram's 4096 char limit."""
+    chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
+    for i, chunk in enumerate(chunks):
+        if i == 0 and status_msg:
+            try:
+                await status_msg.edit_text(chunk, parse_mode=parse_mode)
+            except Exception:
+                await status_msg.edit_text(chunk)
+        else:
+            try:
+                await update.message.reply_text(chunk, parse_mode=parse_mode)
+            except Exception:
+                await update.message.reply_text(chunk)
+
 async def notify_admin_error(context: ContextTypes.DEFAULT_TYPE, location: str, error: Exception) -> None:
     if ADMIN_ID:
         try:
@@ -1024,24 +1039,12 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE, voice
                 except Exception as e:
                     logger.error(f"TTS Error: {e}")
                     # Fallback to text if TTS fails
-                    try:
-                        await update.message.reply_text(formatted_text, parse_mode='HTML')
-                    except Exception:
-                        await update.message.reply_text(reply_text)
+                    await send_long_message(update, formatted_text, status_msg if not search_failed else None, parse_mode='HTML')
                 finally:
                     context.user_data['wants_voice_reply'] = False
             else:
                 # Normal Text Reply
-                if status_msg and not search_failed:
-                    try:
-                        await status_msg.edit_text(formatted_text, parse_mode='HTML')
-                    except Exception:
-                        await status_msg.edit_text(reply_text)
-                else:
-                    try:
-                        await update.message.reply_text(formatted_text, parse_mode='HTML')
-                    except Exception:
-                        await update.message.reply_text(reply_text)
+                await send_long_message(update, formatted_text, status_msg if not search_failed else None, parse_mode='HTML')
             
             # Fire image generation AFTER the LLM reply is delivered
             # Use original_user_message to keep the prompt clean (no system notes!)
