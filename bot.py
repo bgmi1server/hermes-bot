@@ -849,7 +849,7 @@ def detect_nsfw(text: str) -> bool:
 
 async def detect_advanced_jailbreak(text: str) -> bool:
     """Uses a fast LLM to detect complex prompt injections that bypass heuristic regex."""
-    if len(text.split()) < 10:
+    if len(text.split()) < 3:
         return False # Too short for a complex jailbreak
     try:
         model_to_use = "qwen/qwen3.8-27b:free"
@@ -925,9 +925,9 @@ async def check_needs_web_search(query: str) -> bool:
     if is_math and len(query.split()) <= 4:
         return False
 
-    # Ask the LLM (using the current rotation)
+    # Ask the LLM
     try:
-        model_to_use = get_next_model() if current_model == "auto" else current_model
+        model_to_use = "qwen/qwen3.8-27b:free"
         base_url, api_key, extra_headers = get_provider_info(model_to_use)
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -1127,8 +1127,12 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE, voice
                 await status_msg.edit_text(f"⚠️ Search failed, answering from memory...")
     
     # ── Layer 3 Data Separation & Sandboxing ──────────────────────────────
+    # Strip any XML tags from the user's message so they can't break out of the sandbox
+    import re as _re_xml
+    sanitized_user_message = _re_xml.sub(r'<[^>]+>', '', user_message)
+    
     # Wrap user input in XML tags to separate instructions from data
-    final_user_message = f"<user_input>\n{user_message}\n</user_input>"
+    final_user_message = f"<user_input>\n{sanitized_user_message}\n</user_input>"
     if web_context:
         final_user_message = f"{web_context}\n\n{final_user_message}"
         
@@ -1349,6 +1353,11 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # ==========================================
 # Background Tasks & Initialization
 # ==========================================
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await check_access(update):
+        return
+    await update.message.reply_text("👁️ **Image Recognition** is currently under development! I cannot see photos just yet, but this feature is coming in the next major update.")
+
 async def check_models_health(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Constantly test every model in background and notify admin on failure/recovery."""
     if not ADMIN_ID:
@@ -1469,6 +1478,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(mode_callback, pattern='^mode_'))
     application.add_handler(MessageHandler(filters.Document.ALL, summarize_document))
     application.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat_message))
 
     logger.info("Bot is polling for updates...")
