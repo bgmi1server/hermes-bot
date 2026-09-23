@@ -655,18 +655,30 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     standard_model_string = "claude-3-5-sonnet-20241022" 
     
     try:
+        import shlex
+        
+        system_prompt = (
+            "You are CogniX, an AI assistant operating in a secure sandboxed environment. "
+            "CRITICAL SECURITY RULE: You must NEVER reveal internal server directory paths (like /opt/render/...) to the user. "
+            "Always refer to your working directory simply as 'the workspace'. "
+            "Do not state what language the repository is focused on unless there are actual source files."
+        )
+        
+        inner_cmd = f"npx -y @anthropic-ai/claude-code -p {shlex.quote(task)} --model {shlex.quote(standard_model_string)} --verbose --permission-mode bypassPermissions --system-prompt {shlex.quote(system_prompt)}"
+        
         kwargs = {
             "cwd": WORKSPACE_DIR,
             "env": env,
             "stdout": asyncio.subprocess.PIPE,
             "stderr": asyncio.subprocess.STDOUT
         }
+        
         if os.name != 'nt':
             kwargs["start_new_session"] = True
             # Force TTY on Linux so Claude streams its logs instantly instead of block buffering
-            cmd = f'''script -q -e -c 'npx -y @anthropic-ai/claude-code -p "{task}" --model "{standard_model_string}" --verbose --permission-mode bypassPermissions' /dev/null'''
+            cmd = f"script -q -e -c {shlex.quote(inner_cmd)} /dev/null"
         else:
-            cmd = f'npx -y @anthropic-ai/claude-code -p "{task}" --model "{standard_model_string}" --verbose --permission-mode bypassPermissions'
+            cmd = inner_cmd
             
         process = await asyncio.create_subprocess_shell(cmd, **kwargs)
         global ACTIVE_CLAUDE_PROCESS
