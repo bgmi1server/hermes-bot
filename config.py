@@ -81,36 +81,55 @@ MODELS = {
     "claude-sonnet-4.6": {
         "url": "https://conduit.ozdoev.net/v1",
         "key": "sk-cdt-eyJpZCI6IjE4NjQ4MTEwOTciLCJ1IjoiIiwibiI6ImRlZmF1bHQiLCJqIjoiZGVmYXVsdCIsImsiOiJhcGkifQ.8omON19NcZSVPa13v_8z6Ymj2qvItnXPlXs0Eod6OJE",
-        "extra_headers": {"anthropic-version": "2023-06-01"}
+        "extra_headers": {"anthropic-version": "2023-06-01"},
+        "cli_only": True
     },
     
     # --- VyceAI (Claude Proxy) ---
     "claude-sonnet-4-6": {
         "url": "https://vyceai.com/v1",
         "key": "sk-977f24686bf98b713d70bfea6fc1bca154498bf111ef2247",
-        "extra_headers": {"anthropic-version": "2023-06-01"}
+        "extra_headers": {"anthropic-version": "2023-06-01"},
+        "cli_only": True
     }
 }
 
-AVAILABLE_MODELS = list(MODELS.keys())
-HEALTHY_MODELS = AVAILABLE_MODELS.copy()
-DEFAULT_MODEL = "auto"  # 'auto' triggers round-robin
+# ALL models for health checking
+ALL_MODELS = list(MODELS.keys())
+HEALTHY_MODELS = ALL_MODELS.copy()
 
-model_iterator = itertools.cycle(AVAILABLE_MODELS)
+# Filtered lists
+AVAILABLE_MODELS = [m for m, info in MODELS.items() if not info.get("cli_only")]
+CLAUDE_CLI_MODELS = [m for m, info in MODELS.items() if info.get("cli_only")]
+
+DEFAULT_MODEL = "auto"
+
+chat_model_iterator = itertools.cycle(AVAILABLE_MODELS)
+claude_model_iterator = itertools.cycle(CLAUDE_CLI_MODELS) if CLAUDE_CLI_MODELS else itertools.cycle(AVAILABLE_MODELS)
 
 def get_next_model():
-    """Returns the next HEALTHY model in the round-robin cycle."""
-    global model_iterator
-    
-    # If no models are marked healthy, fallback to all models
+    """Returns the next HEALTHY standard chat model in the round-robin cycle."""
+    global chat_model_iterator
     pool = HEALTHY_MODELS if HEALTHY_MODELS else AVAILABLE_MODELS
     
     for _ in range(len(AVAILABLE_MODELS)):
-        candidate = next(model_iterator)
+        candidate = next(chat_model_iterator)
+        if candidate in pool and not MODELS[candidate].get("cli_only"):
+            return candidate
+            
+    return next(chat_model_iterator)
+
+def get_next_claude_model():
+    """Returns the next HEALTHY Claude-specific model for the CLI."""
+    global claude_model_iterator
+    pool = HEALTHY_MODELS if HEALTHY_MODELS else CLAUDE_CLI_MODELS
+    
+    for _ in range(len(CLAUDE_CLI_MODELS)):
+        candidate = next(claude_model_iterator)
         if candidate in pool:
             return candidate
             
-    return next(model_iterator)
+    return next(claude_model_iterator)
 
 def get_provider_info(model_name):
     """Returns the (base_url, api_key, extra_headers) for the requested model."""

@@ -501,9 +501,9 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     # Apply round-robin selection across all configured providers
-    from config import get_next_model, get_provider_info
+    from config import get_next_claude_model, get_provider_info
     
-    model_to_use = get_next_model()
+    model_to_use = get_next_claude_model()
     base_url, api_key, extra_headers = get_provider_info(model_to_use)
     
     if not api_key:
@@ -1718,7 +1718,8 @@ async def check_models_health(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
         
     failed_models = set()
-    for model in AVAILABLE_MODELS:
+    from config import ALL_MODELS
+    for model in ALL_MODELS:
         base_url, api_key, extra_headers = get_provider_info(model)
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -1737,10 +1738,10 @@ async def check_models_health(context: ContextTypes.DEFAULT_TYPE) -> None:
             failed_models.add(model)
             
     import config
-    old_failed = set(AVAILABLE_MODELS) - set(config.HEALTHY_MODELS)
+    old_failed = set(ALL_MODELS) - set(config.HEALTHY_MODELS)
     
     # Update global health list
-    config.HEALTHY_MODELS = [m for m in AVAILABLE_MODELS if m not in failed_models]
+    config.HEALTHY_MODELS = [m for m in ALL_MODELS if m not in failed_models]
     
     newly_failed = failed_models - old_failed
     newly_recovered = old_failed - failed_models
