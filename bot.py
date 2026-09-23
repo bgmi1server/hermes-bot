@@ -41,12 +41,60 @@ user_models = {}  # {user_id: model_name}
 user_modes = {}   # {user_id: mode_name}
 maintenance_mode = False
 banned_users = set()
+ACTIVE_CLAUDE_PROCESS = None
 
 # Global HTTP client for connection pooling (speeds up requests)
 http_client = httpx.AsyncClient(timeout=120.0)
 
+# ==========================================
+# Claude Code Local Transparent Reverse Proxy
+# ==========================================
+from aiohttp import web
+import aiohttp
 import json
 import os
+
+PROXY_TARGET_URL = ""
+PROXY_TARGET_MODEL = ""
+
+async def claude_proxy_handler(request):
+    try:
+        body = await request.json()
+        
+        # Override the official model with the proxy's specific alias
+        if PROXY_TARGET_MODEL:
+            body['model'] = PROXY_TARGET_MODEL
+            
+        headers = dict(request.headers)
+        headers.pop('Host', None)
+        # Bypass Cloudflare for VyceAI!
+        headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+        
+        # Ensure the target url handles both /messages and /v1/messages gracefully
+        target = f"{PROXY_TARGET_URL}/messages"
+        if target.endswith("/v1/messages/messages"):
+             target = target.replace("/messages/messages", "/messages")
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(target, json=body, headers=headers) as resp:
+                proxy_resp = web.StreamResponse(status=resp.status, headers=dict(resp.headers))
+                await proxy_resp.prepare(request)
+                async for chunk in resp.content.iter_chunked(4096):
+                    await proxy_resp.write(chunk)
+                return proxy_resp
+    except Exception as e:
+        logger.error(f"Proxy Error: {e}")
+        return web.Response(status=500, text=str(e))
+
+async def start_local_proxy():
+    app = web.Application()
+    app.router.add_post('/messages', claude_proxy_handler)
+    app.router.add_post('/v1/messages', claude_proxy_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '127.0.0.1', 8080)
+    await site.start()
+    logger.info("Local Claude Proxy started on port 8080")
 import urllib.request
 import urllib.error
 
@@ -478,6 +526,33 @@ async def logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 WORKSPACE_DIR = os.path.join(os.getcwd(), "agent_workspace")
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
 
+async def stopclaude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        return
+        
+    global ACTIVE_CLAUDE_PROCESS
+    if ACTIVE_CLAUDE_PROCESS:
+        try:
+            ACTIVE_CLAUDE_PROCESS.kill()
+            ACTIVE_CLAUDE_PROCESS = None
+            await update.message.reply_text("🛑 **Claude Code Agent** has been forcefully terminated.")
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ Failed to terminate process: {e}")
+    else:
+        await update.message.reply_text("💤 No Claude Code Agent is currently running.")
+
+async def claudestatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        return
+        
+    global ACTIVE_CLAUDE_PROCESS
+    if ACTIVE_CLAUDE_PROCESS and ACTIVE_CLAUDE_PROCESS.returncode is None:
+        await update.message.reply_text("🟢 **Claude Code Agent** is currently running.")
+    else:
+        await update.message.reply_text("💤 **Claude Code Agent** is idle.")
+
 async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     # 1. Absolute Access Control
@@ -510,23 +585,34 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("❌ The selected model does not have a valid API key configured.")
         return
 
-    status_msg = await update.message.reply_text(f"🤖 **Claude Code Agent** spawning...\nRouting through: `{model_to_use}`\n\n```\nInitializing...\n```", parse_mode='Markdown')
+    # Set up global proxy targets so the local proxy knows where to route
+    global PROXY_TARGET_URL, PROXY_TARGET_MODEL
+    PROXY_TARGET_URL = base_url
+    PROXY_TARGET_MODEL = model_to_use
+
+    status_msg = await update.message.reply_text(f"🤖 **Claude Code Agent** spawning...\nRouting through: `{model_to_use}` (Via Local Proxy)\n\n```\nInitializing...\n```", parse_mode='Markdown')
 
     env = os.environ.copy()
     env["ANTHROPIC_API_KEY"] = api_key
-    if base_url:
-        env["ANTHROPIC_BASE_URL"] = base_url
+    env["ANTHROPIC_BASE_URL"] = "http://127.0.0.1:8080" # Force Claude CLI through our local reverse proxy
         
-    # Claude code prompts for interactions by default. We run it non-interactively if possible.
+    # We pass standard Claude model string to the CLI so it doesn't fail its internal validation!
+    # The proxy will seamlessly swap it out for the proxy alias (e.g. claude-sonnet-4.6)
+    standard_model_string = "claude-3-5-sonnet-20241022" 
     
+    # Run interactively with verbose output to get the thinking blocks, but piped to skip user prompts
+    # -p prints only final answer. We'll try without -p but with Yes to all prompts if possible, 
+    # but the simplest way to see logs in CLI is to use --verbose
     try:
         process = await asyncio.create_subprocess_shell(
-            f'npx -y @anthropic-ai/claude-code -p "{task}" --model "{model_to_use}"',
+            f'npx -y @anthropic-ai/claude-code -p "{task}" --model "{standard_model_string}" --verbose',
             cwd=WORKSPACE_DIR,
             env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT
         )
+        global ACTIVE_CLAUDE_PROCESS
+        ACTIVE_CLAUDE_PROCESS = process
     except Exception as e:
         await status_msg.edit_text(f"❌ Failed to spawn agent: {e}")
         return
@@ -1792,7 +1878,9 @@ async def post_init(application: Application) -> None:
                     {'command': 'maintenance', 'description': 'Toggle maintenance mode (Admin)'},
                     {'command': 'ban', 'description': 'Permanently ban a user (Admin)'},
                     {'command': 'unban', 'description': 'Unban a user (Admin)'},
-                    {'command': 'claude', 'description': 'Run an autonomous Claude Code CLI task (Admin)'}
+                    {'command': 'claude', 'description': 'Run an autonomous Claude Code CLI task (Admin)'},
+                    {'command': 'stopclaude', 'description': 'Stop the currently running Claude agent (Admin)'},
+                    {'command': 'claudestatus', 'description': 'Check if a Claude agent is currently running (Admin)'}
                 ]
                 # Set admin commands ONLY for the Admin
                 await http_client.post(url, json={'commands': admin_cmds, 'scope': {'type': 'chat', 'chat_id': ADMIN_ID}}, timeout=10.0)
@@ -1800,6 +1888,9 @@ async def post_init(application: Application) -> None:
             logger.error(f"Failed to set command menus via HTTP: {e}")
             
         if ADMIN_ID:
+            # Start local reverse proxy for Claude
+            asyncio.create_task(start_local_proxy())
+            
             # 2. Start Health Check Job (Every 2 minutes)
             application.job_queue.run_repeating(check_models_health, interval=120, first=10)
             
@@ -1847,6 +1938,8 @@ def main() -> None:
     application.add_handler(CommandHandler("ban", ban_command))
     application.add_handler(CommandHandler("unban", unban_command))
     application.add_handler(CommandHandler("claude", claude_command))
+    application.add_handler(CommandHandler("stopclaude", stopclaude_command))
+    application.add_handler(CommandHandler("claudestatus", claudestatus_command))
     application.add_handler(CallbackQueryHandler(mode_callback, pattern='^mode_'))
     application.add_handler(MessageHandler(filters.Document.ALL, summarize_document))
     application.add_handler(MessageHandler(filters.VOICE, handle_voice))
