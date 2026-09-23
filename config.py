@@ -69,12 +69,26 @@ MODELS = {
     },
     # --- Custom Proxy Free Models (Based on User's API constraints) ---
     "qwen3.8-27b-free": {
-        "url": "https://openrouter.ai/api/v1",  # User's custom router
+        "url": "https://openrouter.ai/api/v1",
         "key": OPENROUTER_API_KEY
     },
     "glm-5.3-flash-free": {
         "url": "https://openrouter.ai/api/v1",
         "key": OPENROUTER_API_KEY
+    },
+    
+    # --- Conduit (Claude Proxy) ---
+    "claude-sonnet-4.6": {
+        "url": "https://conduit.ozdoev.net/v1",
+        "key": "sk-cdt-eyJpZCI6IjE4NjQ4MTEwOTciLCJ1IjoiIiwibiI6ImRlZmF1bHQiLCJqIjoiZGVmYXVsdCIsImsiOiJhcGkifQ.8omON19NcZSVPa13v_8z6Ymj2qvItnXPlXs0Eod6OJE",
+        "extra_headers": {"anthropic-version": "2023-06-01"}
+    },
+    
+    # --- VyceAI (Claude Proxy) ---
+    "claude-sonnet-4-6": {
+        "url": "https://vyceai.com/v1",
+        "key": "sk-977f24686bf98b713d70bfea6fc1bca154498bf111ef2247",
+        "extra_headers": {"anthropic-version": "2023-06-01"}
     }
 }
 

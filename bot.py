@@ -1799,8 +1799,8 @@ async def post_init(application: Application) -> None:
             logger.error(f"Failed to set command menus via HTTP: {e}")
             
         if ADMIN_ID:
-            # 2. Start Health Check Job (Every 30 minutes)
-            application.job_queue.run_repeating(check_models_health, interval=1800, first=10)
+            # 2. Start Health Check Job (Every 2 minutes)
+            application.job_queue.run_repeating(check_models_health, interval=120, first=10)
             
             # 3. Send Startup Notification
             await application.bot.send_message(
