@@ -538,11 +538,22 @@ async def stopclaude_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     global ACTIVE_CLAUDE_PROCESS
     if ACTIVE_CLAUDE_PROCESS:
         try:
-            ACTIVE_CLAUDE_PROCESS.kill()
+            if ACTIVE_CLAUDE_PROCESS.returncode is None:
+                import signal
+                if os.name == 'nt':
+                    import subprocess
+                    subprocess.run(['taskkill', '/F', '/T', '/PID', str(ACTIVE_CLAUDE_PROCESS.pid)], capture_output=True)
+                else:
+                    os.killpg(os.getpgid(ACTIVE_CLAUDE_PROCESS.pid), signal.SIGKILL)
             ACTIVE_CLAUDE_PROCESS = None
             await update.message.reply_text("🛑 **Claude Code Agent** has been forcefully terminated.")
         except Exception as e:
-            await update.message.reply_text(f"⚠️ Failed to terminate process: {e}")
+            try:
+                ACTIVE_CLAUDE_PROCESS.kill()
+                ACTIVE_CLAUDE_PROCESS = None
+                await update.message.reply_text("🛑 **Claude Code Agent** was terminated (fallback kill).")
+            except Exception as e2:
+                await update.message.reply_text(f"⚠️ Failed to terminate process tree: {e} | {e2}")
     else:
         await update.message.reply_text("💤 No Claude Code Agent is currently running.")
 
@@ -644,12 +655,18 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     standard_model_string = "claude-3-5-sonnet-20241022" 
     
     try:
+        kwargs = {
+            "cwd": WORKSPACE_DIR,
+            "env": env,
+            "stdout": asyncio.subprocess.PIPE,
+            "stderr": asyncio.subprocess.STDOUT
+        }
+        if os.name != 'nt':
+            kwargs["start_new_session"] = True
+            
         process = await asyncio.create_subprocess_shell(
             f'npx -y @anthropic-ai/claude-code -p "{task}" --model "{standard_model_string}" --verbose --permission-mode bypassPermissions',
-            cwd=WORKSPACE_DIR,
-            env=env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT
+            **kwargs
         )
         global ACTIVE_CLAUDE_PROCESS
         ACTIVE_CLAUDE_PROCESS = process
@@ -661,51 +678,67 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     start_time = time.time()
     TIMEOUT = 300 # 5 minutes
     
-    output_lines = []
-    last_edit_time = time.time()
-    current_action = "Thinking..."
+    raw_output = ""
+    current_action = "Initializing..."
+    is_running = True
+    
+    import re
+    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
     
     async def read_stream():
-        nonlocal output_lines, last_edit_time, current_action
-        import re
-        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-        
-        while True:
-            line = await process.stdout.readline()
-            if not line:
+        nonlocal raw_output, current_action
+        while is_running:
+            try:
+                # Read chunks of bytes instantly without waiting for a newline character!
+                # This fixes the freeze when Claude Code prints "Thinking..." without a \n
+                chunk = await process.stdout.read(128)
+                if not chunk:
+                    break
+                    
+                text = chunk.decode('utf-8', errors='replace')
+                raw_output += text
+                
+                # Guess action from recent text
+                recent_text = ansi_escape.sub('', raw_output[-200:].lower())
+                if "tool" in recent_text or "running" in recent_text:
+                    current_action = "🔧 Running tools..."
+                elif "thinking" in recent_text:
+                    current_action = "🧠 Thinking..."
+                elif "error" in recent_text:
+                    current_action = "⚠️ API Error encountered!"
+            except Exception:
                 break
-                
-            text_line = line.decode('utf-8', errors='replace').strip()
-            if not text_line:
-                continue
-                
-            text_line = ansi_escape.sub('', text_line)
+
+    async def update_ui():
+        last_sent = ""
+        while is_running:
+            await asyncio.sleep(3.5)
+            clean_out = ansi_escape.sub('', raw_output)
             
-            # Simple heuristic to extract action state
-            if "tool" in text_line.lower() or "running" in text_line.lower() or "executing" in text_line.lower():
-                current_action = "🔧 " + text_line[:40] + "..."
-            elif "API Error" in text_line:
-                current_action = "⚠️ API Error encountered!"
+            # Format cleanly for telegram (keep last 500 chars)
+            lines = [line.strip() for line in clean_out.split('\n') if line.strip()]
+            if len(lines) > 10:
+                lines = lines[-10:]
+            
+            terminal_block = "\n> ".join(lines).replace('```', "'''")
+            if terminal_block:
+                terminal_block = "> " + terminal_block
                 
-            output_lines.append("> " + text_line)
-            # Keep only last 10 lines for a faster, cleaner terminal window
-            if len(output_lines) > 10:
-                output_lines = output_lines[-10:]
-                
-            current_time = time.time()
-            # 3.5 seconds completely eliminates Telegram Rate-Limit visual lagging!
-            if current_time - last_edit_time > 3.5:
+            live_ui = f"{ui_header}**[Live Terminal]**\n```text\n{terminal_block}\n```\n────────────────────\n⏳ **Status:** {current_action}"
+            
+            if live_ui != last_sent:
                 try:
-                    terminal_block = "\n".join(output_lines).replace('```', "'''")
-                    live_ui = f"{ui_header}**[Live Terminal]**\n```text\n{terminal_block}\n```\n────────────────────\n⏳ **Status:** {current_action}"
                     await status_msg.edit_text(live_ui, parse_mode='Markdown')
-                    last_edit_time = current_time
+                    last_sent = live_ui
                 except Exception:
                     pass
 
     try:
-        await asyncio.wait_for(read_stream(), timeout=TIMEOUT)
-        await process.wait()
+        # Run reader and UI updater concurrently
+        stream_task = asyncio.create_task(read_stream())
+        ui_task = asyncio.create_task(update_ui())
+        
+        await asyncio.wait_for(process.wait(), timeout=TIMEOUT)
         
         # Save to GitHub DB
         await sync_workspace_to_github(push=True, commit_msg=f"Auto-save: {task[:50]}")
@@ -721,7 +754,14 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             repo_url = "https://github.com/bgmi1server/hermes-workspace"
             preview_text = f"📁 **View Code:** [Open GitHub Repository]({repo_url})"
         
-        terminal_block = "\n".join(output_lines[-15:]).replace('```', "'''")
+        clean_out = ansi_escape.sub('', raw_output)
+        lines = [line.strip() for line in clean_out.split('\n') if line.strip()]
+        if len(lines) > 15:
+            lines = lines[-15:]
+        terminal_block = "\n> ".join(lines).replace('```', "'''")
+        if terminal_block:
+            terminal_block = "> " + terminal_block
+            
         if process.returncode == 0:
             final_ui = f"✅ **𝗔𝗴𝗲𝗻𝘁 𝗖𝗹𝗮𝘂𝗱𝗲 (Finished)**\n⚙️ Model: `{model_to_use}`\n────────────────────\n**[Final Output]**\n```text\n{terminal_block}\n```\n────────────────────\n💾 Workspace saved to GitHub.\n{preview_text}"
         else:
@@ -734,7 +774,14 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             process.kill()
         except Exception:
             pass
-        terminal_block = "\n".join(output_lines[-20:]).replace('```', "'''")
+        clean_out = ansi_escape.sub('', raw_output)
+        lines = [line.strip() for line in clean_out.split('\n') if line.strip()]
+        if len(lines) > 20:
+            lines = lines[-20:]
+        terminal_block = "\n> ".join(lines).replace('```', "'''")
+        if terminal_block:
+            terminal_block = "> " + terminal_block
+            
         await status_msg.edit_text(f"🛑 **TIMEOUT KILL-SWITCH ACTIVATED**\nAgent ran longer than 5 minutes and was terminated.\n\n```text\n{terminal_block}\n```", parse_mode='Markdown')
         await notify_admin_error(context, "Claude CLI Timeout", Exception("Agent killed after 5 mins."))
     except Exception as e:
@@ -743,6 +790,10 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except Exception:
             pass
         await status_msg.edit_text(f"❌ **Agent Error**\n\n```\n{e}\n```", parse_mode='Markdown')
+    finally:
+        is_running = False
+        stream_task.cancel()
+        ui_task.cancel()
 
     # --- Auto-Zip and Send Workspace ---
     import shutil
