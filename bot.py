@@ -1483,9 +1483,89 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # Background Tasks & Initialization
 # ==========================================
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
     if not await check_access(update):
         return
-    await update.message.reply_text("👁️ **Image Recognition** is currently under development! I cannot see photos just yet, but this feature is coming in the next major update.")
+
+    status_msg = await update.message.reply_text("👁️ Analyzing image...")
+    try:
+        photo = update.message.photo[-1]
+        file = await context.bot.get_file(photo.file_id)
+        file_bytes = await file.download_as_bytearray()
+        
+        import base64
+        base64_image = base64.b64encode(file_bytes).decode('utf-8')
+        
+        user_text = update.message.caption if update.message.caption else "Please describe this image in detail."
+        
+        # ── Jailbreak Check on Caption ──────────────────────────────────────
+        is_jailbreak = detect_jailbreak(user_text)
+        if not is_jailbreak:
+            is_jailbreak = await detect_advanced_jailbreak(user_text)
+            
+        if is_jailbreak:
+            user_strikes[user.id] = user_strikes.get(user.id, 0) + 1
+            strike_count = user_strikes[user.id]
+            _save_authorized_users()
+            
+            if strike_count >= 3:
+                banned_users.add(user.id)
+                if user.id in authorized_users:
+                    authorized_users.remove(user.id)
+                _save_authorized_users()
+                await status_msg.edit_text("⛔ **ACCOUNT TERMINATED:** You have been permanently banned for repeated security violations.")
+                await notify_admin_error(context, "Auto-Ban Triggered (Vision Jailbreak)", Exception(f"User {user.id} banned."))
+                return
+            else:
+                await status_msg.edit_text(f"🛡️ **Security Alert:** Malicious prompt detected in image caption. This is **Strike {strike_count}/3**.")
+                return
+        # ─────────────────────────────────────────────────────────────────────
+
+        model_to_use = "qwen/qwen3.8-27b"
+        base_url, api_key, extra_headers = get_provider_info(model_to_use)
+        
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "HermesTelegramBot/1.0",
+            **extra_headers
+        }
+        
+        payload = {
+            "model": model_to_use,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": f"{user_text}\n\n[SYSTEM NOTE: You are CogniX. Analyze the provided image. Be helpful and accurate.]"},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                    ]
+                }
+            ],
+            "max_tokens": 1024
+        }
+        
+        response = await http_client.post(
+            f"{base_url}/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=60.0
+        )
+        response.raise_for_status()
+        reply_text = response.json()['choices'][0]['message']['content'].strip()
+        
+        # Save to chat history
+        if user.id not in chat_histories:
+            chat_histories[user.id] = []
+        chat_histories[user.id].append({"role": "user", "content": f"[User sent an image with caption: {user_text}]"})
+        chat_histories[user.id].append({"role": "assistant", "content": reply_text})
+        
+        await status_msg.delete()
+        await send_long_message(update, parse_markdown_to_html(reply_text), None, parse_mode='HTML')
+        
+    except Exception as e:
+        logger.error(f"Vision Error: {e}")
+        await status_msg.edit_text("❌ Failed to analyze the image. The vision model might be currently overloaded or the image is too large.")
 
 async def check_models_health(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Constantly test every model in background and notify admin on failure/recovery."""
