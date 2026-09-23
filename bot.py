@@ -663,11 +663,12 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         }
         if os.name != 'nt':
             kwargs["start_new_session"] = True
+            # Force TTY on Linux so Claude streams its logs instantly instead of block buffering
+            cmd = f'''script -q -e -c 'npx -y @anthropic-ai/claude-code -p "{task}" --model "{standard_model_string}" --verbose --permission-mode bypassPermissions' /dev/null'''
+        else:
+            cmd = f'npx -y @anthropic-ai/claude-code -p "{task}" --model "{standard_model_string}" --verbose --permission-mode bypassPermissions'
             
-        process = await asyncio.create_subprocess_shell(
-            f'npx -y @anthropic-ai/claude-code -p "{task}" --model "{standard_model_string}" --verbose --permission-mode bypassPermissions',
-            **kwargs
-        )
+        process = await asyncio.create_subprocess_shell(cmd, **kwargs)
         global ACTIVE_CLAUDE_PROCESS
         ACTIVE_CLAUDE_PROCESS = process
     except Exception as e:
@@ -743,16 +744,46 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         
         await asyncio.wait_for(process.wait(), timeout=TIMEOUT)
         
-        # Save to GitHub DB
-        await sync_workspace_to_github(push=True, commit_msg=f"Auto-save: {task[:50]}")
-        
-        # Render provides 100GB/mo free bandwidth, which is $0 forever for simple landing pages!
-        render_url = os.environ.get("RENDER_EXTERNAL_URL", "http://127.0.0.1:8080")
+        # Determine if any files were actually created or modified
+        git_check = await asyncio.create_subprocess_shell("git status --porcelain", cwd=WORKSPACE_DIR, stdout=asyncio.subprocess.PIPE)
+        stdout, _ = await git_check.communicate()
+        has_changes = bool(stdout.strip())
         
         preview_text = ""
-        if os.path.exists(os.path.join(WORKSPACE_DIR, "index.html")):
-            preview_url = f"{render_url}/preview/index.html"
-            preview_text = f"\n🌐 **Live Website:** [Click here to view it live]({preview_url})"
+        zip_sent = False
+        repo_msg = ""
+        
+        if has_changes:
+            # Save to GitHub DB
+            await sync_workspace_to_github(push=True, commit_msg=f"Auto-save: {task[:50]}")
+            repo_msg = "\n💾 Workspace saved to GitHub."
+            
+            # Send ZIP if files changed
+            import shutil
+            zip_path = os.path.join(os.getcwd(), "agent_workspace_archive")
+            try:
+                shutil.make_archive(zip_path, 'zip', WORKSPACE_DIR)
+                zip_file = f"{zip_path}.zip"
+                if os.path.getsize(zip_file) > 100:
+                    with open(zip_file, 'rb') as f:
+                        await update.message.reply_document(
+                            document=f,
+                            caption="📦 **Workspace Archive**\nHere is your generated code! Extract this zip file on your computer to view the files.",
+                            parse_mode='Markdown'
+                        )
+                    zip_sent = True
+            except Exception as e:
+                logger.error(f"Failed to zip and send workspace: {e}")
+            finally:
+                if os.path.exists(f"{zip_path}.zip"):
+                    os.remove(f"{zip_path}.zip")
+                
+            # Only generate preview if index.html was explicitly created/modified in this run, or exists
+            # Wait, git status only shows modified/untracked. If they modified index.html, it's in stdout.
+            if b"index.html" in stdout or (zip_sent and os.path.exists(os.path.join(WORKSPACE_DIR, "index.html"))):
+                render_url = os.environ.get("RENDER_EXTERNAL_URL", "http://127.0.0.1:8080")
+                preview_url = f"{render_url}/preview/index.html"
+                preview_text = f"\n🌐 **Live Website:** [Click here to view it live]({preview_url})"
         
         clean_out = ansi_escape.sub('', raw_output)
         lines = [line.strip() for line in clean_out.split('\n') if line.strip()]
@@ -767,9 +798,9 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 terminal_block = "> " + terminal_block
             
         if process.returncode == 0:
-            final_ui = f"✅ **𝗔𝗴𝗲𝗻𝘁 𝗖𝗹𝗮𝘂𝗱𝗲 (Finished)**\n⚙️ Model: `{model_to_use}`\n────────────────────\n**[Final Output]**\n```text\n{terminal_block}\n```\n────────────────────\n💾 Workspace saved to GitHub.{preview_text}"
+            final_ui = f"✅ **𝗔𝗴𝗲𝗻𝘁 𝗖𝗹𝗮𝘂𝗱𝗲 (Finished)**\n⚙️ Model: `{model_to_use}`\n────────────────────\n**[Final Output]**\n```text\n{terminal_block}\n```\n────────────────────{repo_msg}{preview_text}"
         else:
-            final_ui = f"⚠️ **𝗔𝗴𝗲𝗻𝘁 𝗖𝗹𝗮𝘂𝗱𝗲 (Error Code {process.returncode})**\n⚙️ Model: `{model_to_use}`\n────────────────────\n**[Final Logs]**\n```text\n{terminal_block}\n```\n────────────────────\n{preview_text}"
+            final_ui = f"⚠️ **𝗔𝗴𝗲𝗻𝘁 𝗖𝗹𝗮𝘂𝗱𝗲 (Error Code {process.returncode})**\n⚙️ Model: `{model_to_use}`\n────────────────────\n**[Final Logs]**\n```text\n{terminal_block}\n```\n────────────────────{repo_msg}{preview_text}"
             
         await status_msg.edit_text(final_ui, parse_mode='Markdown')
         
@@ -798,28 +829,6 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         is_running = False
         stream_task.cancel()
         ui_task.cancel()
-
-    # --- Auto-Zip and Send Workspace ---
-    import shutil
-    zip_path = os.path.join(os.getcwd(), "agent_workspace_archive")
-    try:
-        # Create a zip archive of the workspace directory
-        shutil.make_archive(zip_path, 'zip', WORKSPACE_DIR)
-        
-        # Check if the zip has any actual content (size > 22 bytes usually means it's not totally empty)
-        zip_file = f"{zip_path}.zip"
-        if os.path.getsize(zip_file) > 100:
-            with open(zip_file, 'rb') as f:
-                await update.message.reply_document(
-                    document=f,
-                    caption="📦 **Workspace Archive**\nHere is your generated code! Extract this zip file on your computer to view the files.",
-                    parse_mode='Markdown'
-                )
-    except Exception as e:
-        logger.error(f"Failed to zip and send workspace: {e}")
-    finally:
-        if os.path.exists(f"{zip_path}.zip"):
-            os.remove(f"{zip_path}.zip")
 
 async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
