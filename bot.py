@@ -688,12 +688,13 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 current_action = "⚠️ API Error encountered!"
                 
             output_lines.append("> " + text_line)
-            # Keep only last 15 lines for a clean terminal window
-            if len(output_lines) > 15:
-                output_lines = output_lines[-15:]
+            # Keep only last 10 lines for a faster, cleaner terminal window
+            if len(output_lines) > 10:
+                output_lines = output_lines[-10:]
                 
             current_time = time.time()
-            if current_time - last_edit_time > 1.5:
+            # 3.5 seconds completely eliminates Telegram Rate-Limit visual lagging!
+            if current_time - last_edit_time > 3.5:
                 try:
                     terminal_block = "\n".join(output_lines).replace('```', "'''")
                     live_ui = f"{ui_header}**[Live Terminal]**\n```text\n{terminal_block}\n```\n────────────────────\n⏳ **Status:** {current_action}"
@@ -709,17 +710,18 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Save to GitHub DB
         await sync_workspace_to_github(push=True, commit_msg=f"Auto-save: {task[:50]}")
         
-        # Build Preview/Code URL (Zero Render Cost)
+        # Render provides 100GB/mo free bandwidth, which is $0 forever for simple landing pages!
+        render_url = os.environ.get("RENDER_EXTERNAL_URL", "http://127.0.0.1:8080")
+        
         if os.path.exists(os.path.join(WORKSPACE_DIR, "index.html")):
-            # Uses htmlpreview.github.io to render HTML directly from the GitHub repo without any servers!
-            preview_url = "https://htmlpreview.github.io/?https://github.com/bgmi1server/hermes-workspace/blob/main/index.html"
+            preview_url = f"{render_url}/preview/index.html"
             preview_text = f"🌐 **Live Website:** [Click here to view it live]({preview_url})"
         else:
             # If they just wrote a python script (like hello.py), just link to the repo
             repo_url = "https://github.com/bgmi1server/hermes-workspace"
             preview_text = f"📁 **View Code:** [Open GitHub Repository]({repo_url})"
         
-        terminal_block = "\n".join(output_lines[-20:]).replace('```', "'''")
+        terminal_block = "\n".join(output_lines[-15:]).replace('```', "'''")
         if process.returncode == 0:
             final_ui = f"✅ **𝗔𝗴𝗲𝗻𝘁 𝗖𝗹𝗮𝘂𝗱𝗲 (Finished)**\n⚙️ Model: `{model_to_use}`\n────────────────────\n**[Final Output]**\n```text\n{terminal_block}\n```\n────────────────────\n💾 Workspace saved to GitHub.\n{preview_text}"
         else:
