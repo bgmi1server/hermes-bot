@@ -67,15 +67,35 @@ MODELS = {
         "url": "https://api.groq.com/openai/v1",
         "key": GROQ_API_KEY
     },
+    # --- Custom Proxy Free Models (Based on User's API constraints) ---
+    "qwen3.8-27b-free": {
+        "url": "https://openrouter.ai/api/v1",  # User's custom router
+        "key": OPENROUTER_API_KEY
+    },
+    "glm-5.3-flash-free": {
+        "url": "https://openrouter.ai/api/v1",
+        "key": OPENROUTER_API_KEY
+    }
 }
 
 AVAILABLE_MODELS = list(MODELS.keys())
+HEALTHY_MODELS = AVAILABLE_MODELS.copy()
 DEFAULT_MODEL = "auto"  # 'auto' triggers round-robin
 
 model_iterator = itertools.cycle(AVAILABLE_MODELS)
 
 def get_next_model():
-    """Returns the next model in the round-robin cycle."""
+    """Returns the next HEALTHY model in the round-robin cycle."""
+    global model_iterator
+    
+    # If no models are marked healthy, fallback to all models
+    pool = HEALTHY_MODELS if HEALTHY_MODELS else AVAILABLE_MODELS
+    
+    for _ in range(len(AVAILABLE_MODELS)):
+        candidate = next(model_iterator)
+        if candidate in pool:
+            return candidate
+            
     return next(model_iterator)
 
 def get_provider_info(model_name):

@@ -500,24 +500,28 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await notify_admin_error(context, "Claude CLI Firewall", Exception(f"Blocked task: {task}"))
         return
 
-    # Permanently route Claude Code through OpenRouter (Anthropic proxy)
-    from config import OPENROUTER_API_KEY
+    # Apply round-robin selection across all configured providers
+    from config import get_next_model, get_provider_info
     
-    if not OPENROUTER_API_KEY:
-        await update.message.reply_text("❌ Missing OPENROUTER_API_KEY in config.")
+    model_to_use = get_next_model()
+    base_url, api_key, extra_headers = get_provider_info(model_to_use)
+    
+    if not api_key:
+        await update.message.reply_text("❌ The selected model does not have a valid API key configured.")
         return
 
-    status_msg = await update.message.reply_text("🤖 **Claude Code Agent** spawning in workspace jail...\n\n```\nInitializing...\n```", parse_mode='Markdown')
+    status_msg = await update.message.reply_text(f"🤖 **Claude Code Agent** spawning...\nRouting through: `{model_to_use}`\n\n```\nInitializing...\n```", parse_mode='Markdown')
 
     env = os.environ.copy()
-    env["ANTHROPIC_API_KEY"] = OPENROUTER_API_KEY
-    env["ANTHROPIC_BASE_URL"] = "https://openrouter.ai/api/v1"
+    env["ANTHROPIC_API_KEY"] = api_key
+    if base_url:
+        env["ANTHROPIC_BASE_URL"] = base_url
         
     # Claude code prompts for interactions by default. We run it non-interactively if possible.
     
     try:
         process = await asyncio.create_subprocess_shell(
-            f'npx -y @anthropic-ai/claude-code -p "{task}"',
+            f'npx -y @anthropic-ai/claude-code -p "{task}" --model "{model_to_use}"',
             cwd=WORKSPACE_DIR,
             env=env,
             stdout=asyncio.subprocess.PIPE,
@@ -1691,7 +1695,7 @@ async def check_models_health(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not ADMIN_ID:
         return
         
-    failed_models = []
+    failed_models = set()
     for model in AVAILABLE_MODELS:
         base_url, api_key, extra_headers = get_provider_info(model)
         headers = {
@@ -1708,13 +1712,28 @@ async def check_models_health(context: ContextTypes.DEFAULT_TYPE) -> None:
             resp = await http_client.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=10.0)
             resp.raise_for_status()
         except Exception:
-            failed_models.append(model)
+            failed_models.add(model)
             
-    if failed_models:
-        failed_str = ", ".join(failed_models)
+    import config
+    old_failed = set(AVAILABLE_MODELS) - set(config.HEALTHY_MODELS)
+    
+    # Update global health list
+    config.HEALTHY_MODELS = [m for m in AVAILABLE_MODELS if m not in failed_models]
+    
+    newly_failed = failed_models - old_failed
+    newly_recovered = old_failed - failed_models
+    
+    if newly_failed:
         await context.bot.send_message(
             chat_id=ADMIN_ID, 
-            text=f"⚠️ **Model Health Alert**\nThe following models are currently unresponsive or failing:\n`{failed_str}`",
+            text=f"⚠️ **Model Health Alert**\nThe following models went offline and have been removed from routing:\n`{', '.join(newly_failed)}`",
+            parse_mode='Markdown'
+        )
+        
+    if newly_recovered:
+        await context.bot.send_message(
+            chat_id=ADMIN_ID, 
+            text=f"✅ **Model Health Recovery**\nThe following models are back online and restored to routing:\n`{', '.join(newly_recovered)}`",
             parse_mode='Markdown'
         )
 
