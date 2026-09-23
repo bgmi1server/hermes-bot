@@ -720,9 +720,12 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             if len(lines) > 10:
                 lines = lines[-10:]
             
-            terminal_block = "\n> ".join(lines).replace('```', "'''")
-            if terminal_block:
-                terminal_block = "> " + terminal_block
+            if not lines:
+                terminal_block = "> Booting AI Engine..."
+            else:
+                terminal_block = "\n> ".join(lines).replace('```', "'''")
+                if terminal_block and not terminal_block.startswith(">"):
+                    terminal_block = "> " + terminal_block
                 
             live_ui = f"{ui_header}**[Live Terminal]**\n```text\n{terminal_block}\n```\n────────────────────\n⏳ **Status:** {current_action}"
             
@@ -746,24 +749,25 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Render provides 100GB/mo free bandwidth, which is $0 forever for simple landing pages!
         render_url = os.environ.get("RENDER_EXTERNAL_URL", "http://127.0.0.1:8080")
         
+        preview_text = ""
         if os.path.exists(os.path.join(WORKSPACE_DIR, "index.html")):
             preview_url = f"{render_url}/preview/index.html"
-            preview_text = f"🌐 **Live Website:** [Click here to view it live]({preview_url})"
-        else:
-            # If they just wrote a python script (like hello.py), just link to the repo
-            repo_url = "https://github.com/bgmi1server/hermes-workspace"
-            preview_text = f"📁 **View Code:** [Open GitHub Repository]({repo_url})"
+            preview_text = f"\n🌐 **Live Website:** [Click here to view it live]({preview_url})"
         
         clean_out = ansi_escape.sub('', raw_output)
         lines = [line.strip() for line in clean_out.split('\n') if line.strip()]
         if len(lines) > 15:
             lines = lines[-15:]
-        terminal_block = "\n> ".join(lines).replace('```', "'''")
-        if terminal_block:
-            terminal_block = "> " + terminal_block
+            
+        if not lines:
+            terminal_block = "> Task completed silently."
+        else:
+            terminal_block = "\n> ".join(lines).replace('```', "'''")
+            if terminal_block and not terminal_block.startswith(">"):
+                terminal_block = "> " + terminal_block
             
         if process.returncode == 0:
-            final_ui = f"✅ **𝗔𝗴𝗲𝗻𝘁 𝗖𝗹𝗮𝘂𝗱𝗲 (Finished)**\n⚙️ Model: `{model_to_use}`\n────────────────────\n**[Final Output]**\n```text\n{terminal_block}\n```\n────────────────────\n💾 Workspace saved to GitHub.\n{preview_text}"
+            final_ui = f"✅ **𝗔𝗴𝗲𝗻𝘁 𝗖𝗹𝗮𝘂𝗱𝗲 (Finished)**\n⚙️ Model: `{model_to_use}`\n────────────────────\n**[Final Output]**\n```text\n{terminal_block}\n```\n────────────────────\n💾 Workspace saved to GitHub.{preview_text}"
         else:
             final_ui = f"⚠️ **𝗔𝗴𝗲𝗻𝘁 𝗖𝗹𝗮𝘂𝗱𝗲 (Error Code {process.returncode})**\n⚙️ Model: `{model_to_use}`\n────────────────────\n**[Final Logs]**\n```text\n{terminal_block}\n```\n────────────────────\n{preview_text}"
             
