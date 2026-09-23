@@ -471,6 +471,122 @@ async def logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await update.message.reply_text(f"📜 **System Logs (Last 30 lines):**\n```\n{last_lines}\n```", parse_mode='Markdown')
     except Exception as e:
         await update.message.reply_text(f"❌ Failed to read logs: {e}")
+
+# ==========================================
+# Claude Code Agent Integration
+# ==========================================
+WORKSPACE_DIR = os.path.join(os.getcwd(), "agent_workspace")
+os.makedirs(WORKSPACE_DIR, exist_ok=True)
+
+async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    # 1. Absolute Access Control
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ **UNAUTHORIZED:** Only the Admin can spawn autonomous agents.")
+        return
+        
+    task = " ".join(context.args) if context.args else None
+    if not task:
+        await update.message.reply_text("Please provide a task. Usage: /claude <your task>")
+        return
+
+    # 2. Command Firewall (Regex Blocklist)
+    dangerous_keywords = [
+        "rm -rf", "sudo", "reboot", "shutdown", "mkfs", "chmod -r", "chown", 
+        "mv /", "cp /", "wget", "curl", "nc", "nmap"
+    ]
+    if any(keyword in task.lower() for keyword in dangerous_keywords):
+        await update.message.reply_text("🛡️ **Firewall Alert:** Task blocked due to catastrophic keywords.")
+        await notify_admin_error(context, "Claude CLI Firewall", Exception(f"Blocked task: {task}"))
+        return
+
+    # Check for Anthropic API key
+    from config import ANTHROPIC_API_KEY
+    if not ANTHROPIC_API_KEY:
+        await update.message.reply_text("❌ Missing ANTHROPIC_API_KEY in config.py")
+        return
+
+    status_msg = await update.message.reply_text("🤖 **Claude Code Agent** spawning in workspace jail...\n\n```\nInitializing...\n```", parse_mode='Markdown')
+
+    env = os.environ.copy()
+    env["ANTHROPIC_API_KEY"] = ANTHROPIC_API_KEY
+    # Claude code prompts for interactions by default. We run it non-interactively if possible, or it might error out on user prompts.
+    
+    try:
+        process = await asyncio.create_subprocess_shell(
+            f'npx -y @anthropic-ai/claude-code -p "{task}"',
+            cwd=WORKSPACE_DIR,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT
+        )
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Failed to spawn agent: {e}")
+        return
+
+    # 3. Live Streaming UX + 5 Minute Timeout Kill Switch
+    start_time = time.time()
+    TIMEOUT = 300 # 5 minutes
+    
+    output_log = ""
+    last_edit_time = time.time()
+    
+    async def read_stream():
+        nonlocal output_log, last_edit_time
+        import re
+        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+        
+        while True:
+            line = await process.stdout.readline()
+            if not line:
+                break
+                
+            text_line = line.decode('utf-8', errors='replace').strip()
+            if not text_line:
+                continue
+                
+            text_line = ansi_escape.sub('', text_line)
+            output_log += text_line + "\n"
+            
+            if len(output_log) > 3000:
+                output_log = "..." + output_log[-3000:]
+                
+            current_time = time.time()
+            if current_time - last_edit_time > 2.0:
+                try:
+                    safe_log = output_log.replace('```', "'''")
+                    await status_msg.edit_text(f"🤖 **Claude Code Agent** running...\n\n```\n{safe_log}\n```", parse_mode='Markdown')
+                    last_edit_time = current_time
+                except Exception:
+                    pass
+
+    try:
+        await asyncio.wait_for(read_stream(), timeout=TIMEOUT)
+        await process.wait()
+        
+        safe_log = output_log.replace('```', "'''")
+        if process.returncode == 0:
+            header = "✅ **Claude Code Agent Finished Successfully**"
+        else:
+            header = f"⚠️ **Claude Code Agent Exited with Code {process.returncode}**"
+            
+        await status_msg.edit_text(f"{header}\n\n```\n{safe_log}\n```", parse_mode='Markdown')
+        
+    except asyncio.TimeoutError:
+        try:
+            process.kill()
+        except Exception:
+            pass
+        safe_log = output_log.replace('```', "'''")
+        await status_msg.edit_text(f"🛑 **TIMEOUT KILL-SWITCH ACTIVATED**\nAgent ran longer than 5 minutes and was terminated.\n\n```\n{safe_log}\n```", parse_mode='Markdown')
+        await notify_admin_error(context, "Claude CLI Timeout", Exception("Agent killed after 5 mins."))
+    except Exception as e:
+        try:
+            process.kill()
+        except Exception:
+            pass
+        await status_msg.edit_text(f"❌ **Agent Error**\n\n```\n{e}\n```", parse_mode='Markdown')
+
 async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if not await check_access(update):
@@ -1630,7 +1746,8 @@ async def post_init(application: Application) -> None:
                     {'command': 'clearhistory', 'description': 'Clear user memory (Admin)'},
                     {'command': 'maintenance', 'description': 'Toggle maintenance mode (Admin)'},
                     {'command': 'ban', 'description': 'Permanently ban a user (Admin)'},
-                    {'command': 'unban', 'description': 'Unban a user (Admin)'}
+                    {'command': 'unban', 'description': 'Unban a user (Admin)'},
+                    {'command': 'claude', 'description': 'Run an autonomous Claude Code CLI task (Admin)'}
                 ]
                 # Set admin commands ONLY for the Admin
                 await http_client.post(url, json={'commands': admin_cmds, 'scope': {'type': 'chat', 'chat_id': ADMIN_ID}}, timeout=10.0)
@@ -1684,6 +1801,7 @@ def main() -> None:
     application.add_handler(CommandHandler("maintenance", maintenance_command))
     application.add_handler(CommandHandler("ban", ban_command))
     application.add_handler(CommandHandler("unban", unban_command))
+    application.add_handler(CommandHandler("claude", claude_command))
     application.add_handler(CallbackQueryHandler(mode_callback, pattern='^mode_'))
     application.add_handler(MessageHandler(filters.Document.ALL, summarize_document))
     application.add_handler(MessageHandler(filters.VOICE, handle_voice))
