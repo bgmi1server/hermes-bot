@@ -556,6 +556,43 @@ async def claudestatus_command(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("🟢 **Claude Code Agent** is currently running.")
     else:
         await update.message.reply_text("💤 **Claude Code Agent** is idle.")
+async def sync_workspace_to_github(push=False, commit_msg="Auto-save by Claude"):
+    """Syncs the agent_workspace with the hermes-workspace GitHub repo."""
+    try:
+        from config import GITHUB_PAT
+        if not GITHUB_PAT:
+            return
+            
+        repo_url = f"https://oauth2:{GITHUB_PAT}@github.com/bgmi1server/hermes-workspace.git"
+        
+        # If workspace isn't a git repo, clone it
+        if not os.path.exists(os.path.join(WORKSPACE_DIR, ".git")):
+            # Remove empty workspace dir if it exists to allow clone
+            if not os.listdir(WORKSPACE_DIR):
+                os.rmdir(WORKSPACE_DIR)
+            proc = await asyncio.create_subprocess_shell(f"git clone {repo_url} {WORKSPACE_DIR}")
+            await proc.communicate()
+            if not os.path.exists(WORKSPACE_DIR):
+                os.makedirs(WORKSPACE_DIR, exist_ok=True)
+                
+        if push:
+            # Commit and push
+            cmds = [
+                "git config user.name 'CogniX Bot'",
+                "git config user.email 'bot@cognix.local'",
+                "git add .",
+                f"git commit -m '{commit_msg}'",
+                "git push origin main"
+            ]
+            for cmd in cmds:
+                proc = await asyncio.create_subprocess_shell(cmd, cwd=WORKSPACE_DIR)
+                await proc.communicate()
+        else:
+            # Pull latest
+            proc = await asyncio.create_subprocess_shell("git pull origin main", cwd=WORKSPACE_DIR)
+            await proc.communicate()
+    except Exception as e:
+        logger.error(f"GitHub Sync Error: {e}")
 
 async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
@@ -594,19 +631,18 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     PROXY_TARGET_URL = base_url
     PROXY_TARGET_MODEL = model_to_use
 
-    status_msg = await update.message.reply_text(f"🤖 **Claude Code Agent** spawning...\nRouting through: `{model_to_use}` (Via Local Proxy)\n\n```\nInitializing...\n```", parse_mode='Markdown')
+    # Pull latest from GitHub Workspace DB
+    await sync_workspace_to_github(push=False)
+
+    ui_header = f"🤖 **𝗔𝗴𝗲𝗻𝘁 𝗖𝗹𝗮𝘂𝗱𝗲 (Active)**\n⚙️ Model: `{model_to_use}`\n────────────────────\n"
+    status_msg = await update.message.reply_text(f"{ui_header}⏳ *Syncing workspace and initializing...*", parse_mode='Markdown')
 
     env = os.environ.copy()
     env["ANTHROPIC_API_KEY"] = api_key
     env["ANTHROPIC_BASE_URL"] = "http://127.0.0.1:8080" # Force Claude CLI through our local reverse proxy
         
-    # We pass standard Claude model string to the CLI so it doesn't fail its internal validation!
-    # The proxy will seamlessly swap it out for the proxy alias (e.g. claude-sonnet-4.6)
     standard_model_string = "claude-3-5-sonnet-20241022" 
     
-    # Run interactively with verbose output to get the thinking blocks, but piped to skip user prompts
-    # -p prints only final answer. We'll try without -p but with Yes to all prompts if possible, 
-    # but the simplest way to see logs in CLI is to use --verbose
     try:
         process = await asyncio.create_subprocess_shell(
             f'npx -y @anthropic-ai/claude-code -p "{task}" --model "{standard_model_string}" --verbose',
@@ -625,11 +661,12 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     start_time = time.time()
     TIMEOUT = 300 # 5 minutes
     
-    output_log = ""
+    output_lines = []
     last_edit_time = time.time()
+    current_action = "Thinking..."
     
     async def read_stream():
-        nonlocal output_log, last_edit_time
+        nonlocal output_lines, last_edit_time, current_action
         import re
         ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
         
@@ -643,16 +680,24 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 continue
                 
             text_line = ansi_escape.sub('', text_line)
-            output_log += text_line + "\n"
             
-            if len(output_log) > 3000:
-                output_log = "..." + output_log[-3000:]
+            # Simple heuristic to extract action state
+            if "tool" in text_line.lower() or "running" in text_line.lower() or "executing" in text_line.lower():
+                current_action = "🔧 " + text_line[:40] + "..."
+            elif "API Error" in text_line:
+                current_action = "⚠️ API Error encountered!"
+                
+            output_lines.append("> " + text_line)
+            # Keep only last 15 lines for a clean terminal window
+            if len(output_lines) > 15:
+                output_lines = output_lines[-15:]
                 
             current_time = time.time()
-            if current_time - last_edit_time > 2.0:
+            if current_time - last_edit_time > 1.5:
                 try:
-                    safe_log = output_log.replace('```', "'''")
-                    await status_msg.edit_text(f"🤖 **Claude Code Agent** running...\n\n```\n{safe_log}\n```", parse_mode='Markdown')
+                    terminal_block = "\n".join(output_lines).replace('```', "'''")
+                    live_ui = f"{ui_header}**[Live Terminal]**\n```text\n{terminal_block}\n```\n────────────────────\n⏳ **Status:** {current_action}"
+                    await status_msg.edit_text(live_ui, parse_mode='Markdown')
                     last_edit_time = current_time
                 except Exception:
                     pass
@@ -661,21 +706,24 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await asyncio.wait_for(read_stream(), timeout=TIMEOUT)
         await process.wait()
         
-        safe_log = output_log.replace('```', "'''")
+        # Save to GitHub DB
+        await sync_workspace_to_github(push=True, commit_msg=f"Auto-save: {task[:50]}")
+        
+        terminal_block = "\n".join(output_lines[-20:]).replace('```', "'''")
         if process.returncode == 0:
-            header = "✅ **Claude Code Agent Finished Successfully**"
+            final_ui = f"✅ **𝗔𝗴𝗲𝗻𝘁 𝗖𝗹𝗮𝘂𝗱𝗲 (Finished)**\n⚙️ Model: `{model_to_use}`\n────────────────────\n**[Final Output]**\n```text\n{terminal_block}\n```\n────────────────────\n💾 Workspace saved to GitHub successfully."
         else:
-            header = f"⚠️ **Claude Code Agent Exited with Code {process.returncode}**"
+            final_ui = f"⚠️ **𝗔𝗴𝗲𝗻𝘁 𝗖𝗹𝗮𝘂𝗱𝗲 (Error Code {process.returncode})**\n⚙️ Model: `{model_to_use}`\n────────────────────\n**[Final Logs]**\n```text\n{terminal_block}\n```"
             
-        await status_msg.edit_text(f"{header}\n\n```\n{safe_log}\n```", parse_mode='Markdown')
+        await status_msg.edit_text(final_ui, parse_mode='Markdown')
         
     except asyncio.TimeoutError:
         try:
             process.kill()
         except Exception:
             pass
-        safe_log = output_log.replace('```', "'''")
-        await status_msg.edit_text(f"🛑 **TIMEOUT KILL-SWITCH ACTIVATED**\nAgent ran longer than 5 minutes and was terminated.\n\n```\n{safe_log}\n```", parse_mode='Markdown')
+        terminal_block = "\n".join(output_lines[-20:]).replace('```', "'''")
+        await status_msg.edit_text(f"🛑 **TIMEOUT KILL-SWITCH ACTIVATED**\nAgent ran longer than 5 minutes and was terminated.\n\n```text\n{terminal_block}\n```", parse_mode='Markdown')
         await notify_admin_error(context, "Claude CLI Timeout", Exception("Agent killed after 5 mins."))
     except Exception as e:
         try:
