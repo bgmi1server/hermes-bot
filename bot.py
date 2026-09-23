@@ -67,6 +67,10 @@ async def claude_proxy_handler(request):
             
         headers = dict(request.headers)
         headers.pop('Host', None)
+        headers.pop('Content-Length', None)
+        headers.pop('Content-Encoding', None)
+        headers.pop('Transfer-Encoding', None)
+        headers.pop('Accept-Encoding', None)
         # Bypass Cloudflare for VyceAI!
         headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
         
