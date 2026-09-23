@@ -594,6 +594,28 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             pass
         await status_msg.edit_text(f"❌ **Agent Error**\n\n```\n{e}\n```", parse_mode='Markdown')
 
+    # --- Auto-Zip and Send Workspace ---
+    import shutil
+    zip_path = os.path.join(os.getcwd(), "agent_workspace_archive")
+    try:
+        # Create a zip archive of the workspace directory
+        shutil.make_archive(zip_path, 'zip', WORKSPACE_DIR)
+        
+        # Check if the zip has any actual content (size > 22 bytes usually means it's not totally empty)
+        zip_file = f"{zip_path}.zip"
+        if os.path.getsize(zip_file) > 100:
+            with open(zip_file, 'rb') as f:
+                await update.message.reply_document(
+                    document=f,
+                    caption="📦 **Workspace Archive**\nHere is your generated code! Extract this zip file on your computer to view the files.",
+                    parse_mode='Markdown'
+                )
+    except Exception as e:
+        logger.error(f"Failed to zip and send workspace: {e}")
+    finally:
+        if os.path.exists(f"{zip_path}.zip"):
+            os.remove(f"{zip_path}.zip")
+
 async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if not await check_access(update):
