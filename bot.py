@@ -518,9 +518,11 @@ async def logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         with open('bot.log', 'r', encoding='utf-8') as f:
             lines = f.readlines()
             last_lines = "".join(lines[-30:])
+            if len(last_lines) > 3900:
+                last_lines = "..." + last_lines[-3900:]
             if not last_lines.strip():
                 last_lines = "Log file is empty."
-            await update.message.reply_text(f"📜 **System Logs (Last 30 lines):**\n```\n{last_lines}\n```", parse_mode='Markdown')
+            await update.message.reply_text(f"📜 **System Logs:**\n```\n{last_lines}\n```", parse_mode='Markdown')
     except Exception as e:
         await update.message.reply_text(f"❌ Failed to read logs: {e}")
 
@@ -664,7 +666,7 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "Do not state what language the repository is focused on unless there are actual source files. "
             "BOT MAINTENANCE PROTOCOL: If the user asks you to remove, disable, or fix a failing AI model, you MUST NOT edit config.py manually. "
             "Instead, you must run exactly: `python ../config_manager.py disable <model_name>`. "
-            "After it succeeds, you must run: `bash ../deploy.sh` to deploy the changes to GitHub. "
+            "After it succeeds, you must run: `python ../deploy_bot.py` to deploy the changes to GitHub. "
             "Always confirm to the user once the deployment is complete."
         )
         
@@ -1989,6 +1991,52 @@ async def check_models_health(context: ContextTypes.DEFAULT_TYPE) -> None:
             text=f"✅ **Model Health Recovery**\nThe following models are back online and restored to routing:\n`{', '.join(newly_recovered)}`",
             parse_mode='Markdown'
         )
+        
+async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        return
+        
+    msg = await update.message.reply_text("🩺 Running manual health check on all models...")
+    
+    failed_models = set()
+    from config import ALL_MODELS
+    for model in ALL_MODELS:
+        base_url, api_key, extra_headers = get_provider_info(model)
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            **extra_headers
+        }
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 5
+        }
+        try:
+            resp = await http_client.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=8.0)
+            resp.raise_for_status()
+        except Exception:
+            failed_models.add(model)
+            
+    import config
+    config.HEALTHY_MODELS = [m for m in ALL_MODELS if m not in failed_models]
+    
+    healthy = set(ALL_MODELS) - failed_models
+    
+    report = "🏥 **System Health Report**\n\n"
+    report += "🟢 **Healthy & Active Models:**\n"
+    for m in healthy:
+        report += f"  • `{m}`\n"
+        
+    if failed_models:
+        report += "\n🔴 **Failing Models:**\n"
+        for m in failed_models:
+            report += f"  • `{m}`\n"
+    else:
+        report += "\n✅ All endpoints are perfectly healthy!"
+        
+    await msg.edit_text(report, parse_mode='Markdown')
 
 async def post_init(application: Application) -> None:
     """Setup custom command menus and start background tasks."""
@@ -2018,6 +2066,7 @@ async def post_init(application: Application) -> None:
                     {'command': 'broadcast', 'description': 'Send announcement to all users (Admin)'},
                     {'command': 'stats', 'description': 'View bot statistics (Admin)'},
                     {'command': 'logs', 'description': 'View recent system logs (Admin)'},
+                    {'command': 'health', 'description': 'Check manual health status of all models (Admin)'},
                     {'command': 'clearhistory', 'description': 'Clear user memory (Admin)'},
                     {'command': 'maintenance', 'description': 'Toggle maintenance mode (Admin)'},
                     {'command': 'ban', 'description': 'Permanently ban a user (Admin)'},
@@ -2077,6 +2126,7 @@ def main() -> None:
     application.add_handler(CommandHandler("broadcast", broadcast_command))
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("logs", logs_command))
+    application.add_handler(CommandHandler("health", health_command))
     application.add_handler(CommandHandler("clearhistory", clearhistory_command))
     application.add_handler(CommandHandler("maintenance", maintenance_command))
     application.add_handler(CommandHandler("ban", ban_command))
