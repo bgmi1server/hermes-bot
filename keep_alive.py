@@ -1,16 +1,8 @@
-from flask import Flask, send_from_directory
+from flask import Flask
 from threading import Thread
 import os
 
 app = Flask(__name__)
-WORKSPACE_DIR = os.path.join(os.getcwd(), "agent_workspace")
-
-@app.route('/preview/<path:filename>')
-def serve_preview(filename):
-    """Serve generated files directly from the agent_workspace."""
-    if not os.path.exists(WORKSPACE_DIR):
-        return "Workspace directory not found. Please run Claude first.", 404
-    return send_from_directory(WORKSPACE_DIR, filename)
 
 @app.route('/')
 def home():

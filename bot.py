@@ -709,9 +709,15 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Save to GitHub DB
         await sync_workspace_to_github(push=True, commit_msg=f"Auto-save: {task[:50]}")
         
-        # Build Preview URL
-        render_url = os.environ.get("RENDER_EXTERNAL_URL", "http://127.0.0.1:8080")
-        preview_text = f"🌐 **Live Preview:** [Click to view generated files]({render_url}/preview/index.html)"
+        # Build Preview/Code URL (Zero Render Cost)
+        if os.path.exists(os.path.join(WORKSPACE_DIR, "index.html")):
+            # Uses htmlpreview.github.io to render HTML directly from the GitHub repo without any servers!
+            preview_url = "https://htmlpreview.github.io/?https://github.com/bgmi1server/hermes-workspace/blob/main/index.html"
+            preview_text = f"🌐 **Live Website:** [Click here to view it live]({preview_url})"
+        else:
+            # If they just wrote a python script (like hello.py), just link to the repo
+            repo_url = "https://github.com/bgmi1server/hermes-workspace"
+            preview_text = f"📁 **View Code:** [Open GitHub Repository]({repo_url})"
         
         terminal_block = "\n".join(output_lines[-20:]).replace('```', "'''")
         if process.returncode == 0:
