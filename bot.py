@@ -661,10 +661,14 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "You are CogniX, an AI assistant operating in a secure sandboxed environment. "
             "CRITICAL SECURITY RULE: You must NEVER reveal internal server directory paths (like /opt/render/...) to the user. "
             "Always refer to your working directory simply as 'the workspace'. "
-            "Do not state what language the repository is focused on unless there are actual source files."
+            "Do not state what language the repository is focused on unless there are actual source files. "
+            "BOT MAINTENANCE PROTOCOL: If the user asks you to remove, disable, or fix a failing AI model, you MUST NOT edit config.py manually. "
+            "Instead, you must run exactly: `python ../config_manager.py disable <model_name>`. "
+            "After it succeeds, you must run: `bash ../deploy.sh` to deploy the changes to GitHub. "
+            "Always confirm to the user once the deployment is complete."
         )
         
-        inner_cmd = f"npx -y @anthropic-ai/claude-code -p {shlex.quote(task)} --model {shlex.quote(standard_model_string)} --verbose --permission-mode bypassPermissions --system-prompt {shlex.quote(system_prompt)}"
+        inner_cmd = f"npx -y @anthropic-ai/claude-code -p {shlex.quote(task)} --model {shlex.quote(standard_model_string)} --verbose --permission-mode bypassPermissions --add-dir .. --system-prompt {shlex.quote(system_prompt)}"
         
         kwargs = {
             "cwd": WORKSPACE_DIR,
