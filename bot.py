@@ -500,18 +500,26 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await notify_admin_error(context, "Claude CLI Firewall", Exception(f"Blocked task: {task}"))
         return
 
-    # Check for API key
-    from config import ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL
-    if not ANTHROPIC_API_KEY:
-        await update.message.reply_text("❌ Missing ANTHROPIC_API_KEY in config.py")
+    # Check for API key (Fallback to OpenRouter if Anthropic key is missing)
+    from config import ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, OPENROUTER_API_KEY
+    
+    api_key = ANTHROPIC_API_KEY
+    base_url = ANTHROPIC_BASE_URL
+    
+    if not api_key and OPENROUTER_API_KEY:
+        api_key = OPENROUTER_API_KEY
+        base_url = "https://openrouter.ai/api/v1"
+        
+    if not api_key:
+        await update.message.reply_text("❌ Missing ANTHROPIC_API_KEY or OPENROUTER_API_KEY in config.")
         return
 
     status_msg = await update.message.reply_text("🤖 **Claude Code Agent** spawning in workspace jail...\n\n```\nInitializing...\n```", parse_mode='Markdown')
 
     env = os.environ.copy()
-    env["ANTHROPIC_API_KEY"] = ANTHROPIC_API_KEY
-    if ANTHROPIC_BASE_URL:
-        env["ANTHROPIC_BASE_URL"] = ANTHROPIC_BASE_URL
+    env["ANTHROPIC_API_KEY"] = api_key
+    if base_url:
+        env["ANTHROPIC_BASE_URL"] = base_url
         
     # Claude code prompts for interactions by default. We run it non-interactively if possible.
     
