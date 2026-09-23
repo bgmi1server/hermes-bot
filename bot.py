@@ -500,8 +500,8 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await notify_admin_error(context, "Claude CLI Firewall", Exception(f"Blocked task: {task}"))
         return
 
-    # Check for Anthropic API key
-    from config import ANTHROPIC_API_KEY
+    # Check for API key
+    from config import ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL
     if not ANTHROPIC_API_KEY:
         await update.message.reply_text("❌ Missing ANTHROPIC_API_KEY in config.py")
         return
@@ -510,7 +510,10 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     env = os.environ.copy()
     env["ANTHROPIC_API_KEY"] = ANTHROPIC_API_KEY
-    # Claude code prompts for interactions by default. We run it non-interactively if possible, or it might error out on user prompts.
+    if ANTHROPIC_BASE_URL:
+        env["ANTHROPIC_BASE_URL"] = ANTHROPIC_BASE_URL
+        
+    # Claude code prompts for interactions by default. We run it non-interactively if possible.
     
     try:
         process = await asyncio.create_subprocess_shell(

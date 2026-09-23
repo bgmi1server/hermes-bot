@@ -33,8 +33,9 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 # Groq — ultra-fast inference (activate key on console.groq.com first)
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
-# Anthropic — required for Claude Code CLI autonomous agent
+# Anthropic / Custom Provider — required for Claude Code CLI autonomous agent
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ANTHROPIC_BASE_URL = os.environ.get("ANTHROPIC_BASE_URL", "")
 
 # ==================================
 # Model Routing Registry
