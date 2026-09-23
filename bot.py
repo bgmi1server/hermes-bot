@@ -645,7 +645,7 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     try:
         process = await asyncio.create_subprocess_shell(
-            f'npx -y @anthropic-ai/claude-code -p "{task}" --model "{standard_model_string}" --verbose',
+            f'npx -y @anthropic-ai/claude-code -p "{task}" --model "{standard_model_string}" --verbose --permission-mode bypassPermissions',
             cwd=WORKSPACE_DIR,
             env=env,
             stdout=asyncio.subprocess.PIPE,
@@ -709,11 +709,15 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Save to GitHub DB
         await sync_workspace_to_github(push=True, commit_msg=f"Auto-save: {task[:50]}")
         
+        # Build Preview URL
+        render_url = os.environ.get("RENDER_EXTERNAL_URL", "http://127.0.0.1:8080")
+        preview_text = f"🌐 **Live Preview:** [Click to view generated files]({render_url}/preview/index.html)"
+        
         terminal_block = "\n".join(output_lines[-20:]).replace('```', "'''")
         if process.returncode == 0:
-            final_ui = f"✅ **𝗔𝗴𝗲𝗻𝘁 𝗖𝗹𝗮𝘂𝗱𝗲 (Finished)**\n⚙️ Model: `{model_to_use}`\n────────────────────\n**[Final Output]**\n```text\n{terminal_block}\n```\n────────────────────\n💾 Workspace saved to GitHub successfully."
+            final_ui = f"✅ **𝗔𝗴𝗲𝗻𝘁 𝗖𝗹𝗮𝘂𝗱𝗲 (Finished)**\n⚙️ Model: `{model_to_use}`\n────────────────────\n**[Final Output]**\n```text\n{terminal_block}\n```\n────────────────────\n💾 Workspace saved to GitHub.\n{preview_text}"
         else:
-            final_ui = f"⚠️ **𝗔𝗴𝗲𝗻𝘁 𝗖𝗹𝗮𝘂𝗱𝗲 (Error Code {process.returncode})**\n⚙️ Model: `{model_to_use}`\n────────────────────\n**[Final Logs]**\n```text\n{terminal_block}\n```"
+            final_ui = f"⚠️ **𝗔𝗴𝗲𝗻𝘁 𝗖𝗹𝗮𝘂𝗱𝗲 (Error Code {process.returncode})**\n⚙️ Model: `{model_to_use}`\n────────────────────\n**[Final Logs]**\n```text\n{terminal_block}\n```\n────────────────────\n{preview_text}"
             
         await status_msg.edit_text(final_ui, parse_mode='Markdown')
         
