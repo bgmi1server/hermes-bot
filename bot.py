@@ -61,31 +61,64 @@ async def claude_proxy_handler(request):
     try:
         body = await request.json()
         
-        # Override the official model with the proxy's specific alias
-        if PROXY_TARGET_MODEL:
-            body['model'] = PROXY_TARGET_MODEL
-            
         headers = dict(request.headers)
         headers.pop('Host', None)
         headers.pop('Content-Length', None)
         headers.pop('Content-Encoding', None)
         headers.pop('Transfer-Encoding', None)
         headers.pop('Accept-Encoding', None)
-        # Bypass Cloudflare for VyceAI!
+        # Bypass Cloudflare blocks
         headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
         
-        # Ensure the target url handles both /messages and /v1/messages gracefully
-        target = f"{PROXY_TARGET_URL}/messages"
-        if target.endswith("/v1/messages/messages"):
-             target = target.replace("/messages/messages", "/messages")
+        global PROXY_TARGET_URL, PROXY_TARGET_MODEL
+        current_url = PROXY_TARGET_URL
+        current_model = PROXY_TARGET_MODEL
         
+        max_attempts = 3
         async with aiohttp.ClientSession() as session:
-            async with session.post(target, json=body, headers=headers) as resp:
-                proxy_resp = web.StreamResponse(status=resp.status, headers=dict(resp.headers))
-                await proxy_resp.prepare(request)
-                async for chunk in resp.content.iter_chunked(4096):
-                    await proxy_resp.write(chunk)
-                return proxy_resp
+            for attempt in range(max_attempts):
+                if attempt > 0:
+                    # Switch to the next model in the pool on failure
+                    logger.warning(f"Claude Proxy switching endpoints due to failure...")
+                    new_model_name = get_next_claude_model()
+                    base_url, new_api_key, extra_headers = get_provider_info(new_model_name)
+                    current_url = base_url
+                    current_model = new_model_name
+                    
+                    # Inject the new API key and headers dynamically
+                    headers['x-api-key'] = new_api_key
+                    for k, v in extra_headers.items():
+                        headers[k] = v
+                
+                if current_model:
+                    body['model'] = current_model
+                    
+                target = f"{current_url}/messages"
+                if target.endswith("/v1/messages/messages"):
+                     target = target.replace("/messages/messages", "/messages")
+                
+                try:
+                    async with session.post(target, json=body, headers=headers) as resp:
+                        # If we hit a known rate limit or server timeout, retry transparently!
+                        if resp.status in [429, 500, 502, 503, 504, 522, 524] and attempt < max_attempts - 1:
+                            logger.warning(f"Claude Proxy Attempt {attempt+1} failed with {resp.status} on {current_url}. Retrying...")
+                            continue
+                            
+                        # Success or final attempt: Stream the response back to Claude CLI
+                        PROXY_TARGET_URL = current_url
+                        PROXY_TARGET_MODEL = current_model
+                        
+                        proxy_resp = web.StreamResponse(status=resp.status, headers=dict(resp.headers))
+                        await proxy_resp.prepare(request)
+                        async for chunk in resp.content.iter_chunked(4096):
+                            await proxy_resp.write(chunk)
+                        return proxy_resp
+                except Exception as req_err:
+                    if attempt < max_attempts - 1:
+                        logger.warning(f"Claude Proxy Network Error on attempt {attempt+1}: {req_err}. Retrying...")
+                        continue
+                    raise req_err
+                    
     except Exception as e:
         logger.error(f"Proxy Error: {e}")
         return web.Response(status=500, text=str(e))
