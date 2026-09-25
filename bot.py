@@ -741,9 +741,9 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await status_msg.edit_text(f"❌ Failed to spawn agent: {e}")
         return
 
-    # 3. Live Streaming UX + 5 Minute Timeout Kill Switch
+    # 3. Live Streaming UX + 30 Minute Timeout Kill Switch
     start_time = time.time()
-    TIMEOUT = 300 # 5 minutes
+    TIMEOUT = 1800 # 30 minutes
     
     raw_output = ""
     current_action = "Initializing..."
@@ -883,8 +883,8 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if terminal_block:
             terminal_block = "> " + terminal_block
             
-        await status_msg.edit_text(f"🛑 **TIMEOUT KILL-SWITCH ACTIVATED**\nAgent ran longer than 5 minutes and was terminated.\n\n```text\n{terminal_block}\n```", parse_mode='Markdown')
-        await notify_admin_error(context, "Claude CLI Timeout", Exception("Agent killed after 5 mins."))
+        await status_msg.edit_text(f"🛑 **TIMEOUT KILL-SWITCH ACTIVATED**\nAgent ran longer than 30 minutes and was terminated.\n\n```text\n{terminal_block}\n```", parse_mode='Markdown')
+        await notify_admin_error(context, "Claude CLI Timeout", Exception("Agent killed after 30 mins."))
     except Exception as e:
         try:
             process.kill()
@@ -896,13 +896,28 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         stream_task.cancel()
         ui_task.cancel()
 
-ACTIVE_AGENTS = 0
+ACTIVE_PUBLIC_AGENTS = {}
 MAX_AGENTS = 3
 
+async def stopagent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    process = ACTIVE_PUBLIC_AGENTS.get(user.id)
+    if process:
+        try:
+            process.kill()
+            await update.message.reply_text("🛑 Your agent has been forcefully stopped.")
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ Failed to stop agent: {e}")
+    else:
+        await update.message.reply_text("You don't have any agents currently running.")
+
 async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    global ACTIVE_AGENTS
     user = update.effective_user
     if not await check_access(update):
+        return
+
+    if user.id in ACTIVE_PUBLIC_AGENTS:
+        await update.message.reply_text("⚠️ You already have an agent running! Use `/stopagent` to kill it first.", parse_mode='Markdown')
         return
 
     task = " ".join(context.args) if context.args else None
@@ -910,11 +925,10 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("🖥️ **Public Agent Sandbox**\nUsage: `/agent <your task>`\nExample: `/agent Build a snake game in HTML and zip it`", parse_mode='Markdown')
         return
 
-    if ACTIVE_AGENTS >= MAX_AGENTS:
+    if len(ACTIVE_PUBLIC_AGENTS) >= MAX_AGENTS:
         await update.message.reply_text("⏳ All 3 Agent Sandbox lanes are currently busy. Please try again in a minute.")
         return
 
-    ACTIVE_AGENTS += 1
     status_msg = await update.message.reply_text("🚀 Booting up your secure virtual machine...")
 
     import tempfile, shutil
@@ -951,6 +965,7 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             cmd = inner_cmd
             
         process = await asyncio.create_subprocess_shell(cmd, **kwargs)
+        ACTIVE_PUBLIC_AGENTS[user.id] = process
         
         # ── Live Streaming UX + Sanitizer ────────────────────────────
         is_running = True
@@ -1012,11 +1027,11 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         
         # Layer 4: Time-Bomb Jail
         try:
-            await asyncio.wait_for(process.wait(), timeout=180)
+            await asyncio.wait_for(process.wait(), timeout=600)
             await status_msg.edit_text("✅ Agent finished task. Zipping your artifacts...")
         except asyncio.TimeoutError:
             process.kill()
-            await status_msg.edit_text("⏱️ **Time Bomb Triggered**: Agent exceeded the 3-minute limit and was terminated.")
+            await status_msg.edit_text("⏱️ **Time Bomb Triggered**: Agent exceeded the 10-minute limit and was terminated.")
         finally:
             is_running = False
             stream_task.cancel()
@@ -1076,7 +1091,7 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     finally:
         # Auto Cleanup
         shutil.rmtree(jail_dir, ignore_errors=True)
-        ACTIVE_AGENTS = max(0, ACTIVE_AGENTS - 1)
+        ACTIVE_PUBLIC_AGENTS.pop(user.id, None)
 
 async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
@@ -2281,7 +2296,8 @@ async def post_init(application: Application) -> None:
             {'command': 'imagine', 'description': 'Generate an AI image from a prompt'},
             {'command': 'model', 'description': 'List or switch AI models'},
             {'command': 'mode', 'description': 'Switch between different AI personas and behaviors'},
-            {'command': 'agent', 'description': 'Spawn an autonomous virtual sandbox agent'}
+            {'command': 'agent', 'description': 'Spawn an autonomous virtual sandbox agent'},
+            {'command': 'stopagent', 'description': 'Stop your currently running agent'}
         ]
         
         try:
@@ -2365,6 +2381,7 @@ def main() -> None:
     application.add_handler(CommandHandler("unban", unban_command))
     application.add_handler(CommandHandler("claude", claude_command))
     application.add_handler(CommandHandler("agent", agent_command))
+    application.add_handler(CommandHandler("stopagent", stopagent_command))
     application.add_handler(CommandHandler("stopclaude", stopclaude_command))
     application.add_handler(CommandHandler("claudestatus", claudestatus_command))
     application.add_handler(CallbackQueryHandler(mode_callback, pattern='^mode_'))
