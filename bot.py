@@ -1080,9 +1080,9 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 import keep_alive
                 keep_alive.html_previews[str(user.id)] = html_content
                 
-                # Setup auto-delete task for RAM protection
+                # Setup auto-delete task for RAM protection (24 hours instead of 10 mins)
                 async def expire_preview(uid):
-                    await asyncio.sleep(600) # 10 mins
+                    await asyncio.sleep(86400) # 24 hours
                     if uid in keep_alive.html_previews:
                         del keep_alive.html_previews[uid]
                 asyncio.create_task(expire_preview(str(user.id)))

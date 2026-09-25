@@ -20,7 +20,7 @@ from flask import make_response
 def preview_handler(user_id):
     content = html_previews.get(str(user_id))
     if not content:
-        return "Preview expired or not found. Previews are deleted after 10 minutes.", 404
+        return "Preview expired or not found. Previews are deleted after 24 hours to save memory.", 404
         
     resp = make_response(content)
     resp.headers['Content-Security-Policy'] = "sandbox allow-scripts allow-forms allow-same-origin; default-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdnjs.cloudflare.com; script-src 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdnjs.cloudflare.com;"
