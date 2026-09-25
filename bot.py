@@ -935,22 +935,92 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         
         sys_prompt = "You are a secure, public coding assistant running in an ephemeral sandbox. Write code, test it, and solve the user's problem. When you are finished, just stop."
         import shlex
-        cmd = f"npx -y @anthropic-ai/claude-code -p {shlex.quote(task)} --model claude-3-5-sonnet-20241022 --permission-mode bypassPermissions --system-prompt {shlex.quote(sys_prompt)}"
+        inner_cmd = f"npx -y @anthropic-ai/claude-code -p {shlex.quote(task)} --model claude-3-5-sonnet-20241022 --permission-mode bypassPermissions --system-prompt {shlex.quote(sys_prompt)}"
         
-        await status_msg.edit_text("⚙️ Agent is writing and testing code... (Max 3 minutes)")
+        kwargs = {
+            "cwd": jail_dir,
+            "env": safe_env,
+            "stdout": asyncio.subprocess.PIPE,
+            "stderr": asyncio.subprocess.STDOUT
+        }
         
-        process = await asyncio.create_subprocess_shell(
-            cmd, cwd=jail_dir, env=safe_env,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
+        if os.name != 'nt':
+            kwargs["start_new_session"] = True
+            cmd = f"script -q -e -c {shlex.quote(inner_cmd)} /dev/null"
+        else:
+            cmd = inner_cmd
+            
+        process = await asyncio.create_subprocess_shell(cmd, **kwargs)
+        
+        # ── Live Streaming UX + Sanitizer ────────────────────────────
+        is_running = True
+        raw_output = ""
+        current_action = "Initializing Sandbox..."
+        import re
+        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+        
+        async def read_stream():
+            nonlocal raw_output, current_action
+            while is_running:
+                try:
+                    chunk = await process.stdout.read(128)
+                    if not chunk:
+                        break
+                    text = chunk.decode('utf-8', errors='replace')
+                    raw_output += text
+                    
+                    recent_text = ansi_escape.sub('', raw_output[-200:].lower())
+                    if "tool" in recent_text or "running" in recent_text:
+                        current_action = "🔧 Writing code..."
+                    elif "thinking" in recent_text:
+                        current_action = "🧠 Thinking..."
+                    elif "error" in recent_text:
+                        current_action = "⚠️ Testing failed (Debugging)..."
+                except Exception:
+                    break
+
+        async def update_ui():
+            last_sent = ""
+            while is_running:
+                await asyncio.sleep(2.5)
+                clean_out = ansi_escape.sub('', raw_output)
+                # Sanitizer: Hide real server paths from public users
+                clean_out = clean_out.replace(jail_dir, "/workspace")
+                
+                lines = [line.strip() for line in clean_out.split('\n') if line.strip()]
+                if len(lines) > 8:
+                    lines = lines[-8:]
+                
+                if not lines:
+                    terminal_block = "> Booting virtual machine..."
+                else:
+                    terminal_block = "\n> ".join(lines).replace('```', "'''")
+                    if not terminal_block.startswith(">"):
+                        terminal_block = "> " + terminal_block
+                        
+                live_ui = f"🖥️ **Agent Sandbox (Live)**\n```text\n{terminal_block}\n```\n────────────────────\n⏳ **Status:** {current_action}"
+                
+                if live_ui != last_sent:
+                    try:
+                        await status_msg.edit_text(live_ui, parse_mode='Markdown')
+                        last_sent = live_ui
+                    except Exception:
+                        pass
+        
+        stream_task = asyncio.create_task(read_stream())
+        ui_task = asyncio.create_task(update_ui())
         
         # Layer 4: Time-Bomb Jail
         try:
-            await asyncio.wait_for(process.communicate(), timeout=180)
+            await asyncio.wait_for(process.wait(), timeout=180)
             await status_msg.edit_text("✅ Agent finished task. Zipping your artifacts...")
         except asyncio.TimeoutError:
             process.kill()
             await status_msg.edit_text("⏱️ **Time Bomb Triggered**: Agent exceeded the 3-minute limit and was terminated.")
+        finally:
+            is_running = False
+            stream_task.cancel()
+            ui_task.cancel()
             
         # ── Layer 7: HTML Preview Scraper ────────────────────────────
         html_found = False
