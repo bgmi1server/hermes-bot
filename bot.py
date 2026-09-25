@@ -15,7 +15,7 @@ from telegram.ext import (
 try:
     from config import (
         BOT_TOKEN, ADMIN_ID, GUEST_IDS,
-        get_provider_info, get_next_model,
+        get_provider_info, get_next_model, get_next_claude_model,
         AVAILABLE_MODELS, DEFAULT_MODEL, TAVILY_API_KEY
     )
 except ImportError:
