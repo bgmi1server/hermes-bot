@@ -779,22 +779,26 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     async def update_ui():
         last_sent = ""
         while is_running:
-            await asyncio.sleep(3.5)
+            await asyncio.sleep(3.0)
+            elapsed = int(time.time() - start_time)
+            mins, secs = divmod(elapsed, 60)
+            timer_str = f"{mins:02d}:{secs:02d}"
+            
             clean_out = ansi_escape.sub('', raw_output)
             
-            # Format cleanly for telegram (keep last 500 chars)
+            # Format cleanly for telegram (keep last 15 lines for more context)
             lines = [line.strip() for line in clean_out.split('\n') if line.strip()]
-            if len(lines) > 10:
-                lines = lines[-10:]
+            if len(lines) > 15:
+                lines = lines[-15:]
             
             if not lines:
                 terminal_block = "> Booting AI Engine..."
             else:
                 terminal_block = "\n> ".join(lines).replace('```', "'''")
-                if terminal_block and not terminal_block.startswith(">"):
+                if not terminal_block.startswith(">"):
                     terminal_block = "> " + terminal_block
                 
-            live_ui = f"{ui_header}**[Live Terminal]**\n```text\n{terminal_block}\n```\n────────────────────\n⏳ **Status:** {current_action}"
+            live_ui = f"{ui_header}**[Live Terminal]**\n```text\n{terminal_block}\n```\n────────────────────\n⏱️ **Elapsed:** `{timer_str}`\n⏳ **Status:** {current_action}"
             
             if live_ui != last_sent:
                 try:
@@ -939,12 +943,17 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         model_to_use = get_next_claude_model()
         base_url, api_key, extra_headers = get_provider_info(model_to_use)
         
-        # Layer 2: Amnesia Environment Scrubbing
+        # Layer 2: Amnesia Environment Scrubbing + Cache Isolation
         safe_env = {
             "PATH": os.environ.get("PATH", ""),
             "ANTHROPIC_API_KEY": api_key,
-            # Point to local proxy WITH public role query param for DPI Firewall
-            "ANTHROPIC_BASE_URL": "http://127.0.0.1:8080/?role=public" 
+            "ANTHROPIC_BASE_URL": "http://127.0.0.1:8080/?role=public",
+            "HOME": jail_dir,
+            "USERPROFILE": jail_dir,
+            "APPDATA": jail_dir,
+            "LOCALAPPDATA": jail_dir,
+            "CLAUDE_CONFIG_DIR": jail_dir,
+            "npm_config_cache": os.path.join(jail_dir, ".npm")
         }
         
         sys_prompt = "You are a secure, public coding assistant running in an ephemeral sandbox. Write code, test it, and solve the user's problem. When you are finished, just stop."
@@ -994,17 +1003,22 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 except Exception:
                     break
 
+        start_time = time.time()
         async def update_ui():
             last_sent = ""
             while is_running:
                 await asyncio.sleep(2.5)
+                elapsed = int(time.time() - start_time)
+                mins, secs = divmod(elapsed, 60)
+                timer_str = f"{mins:02d}:{secs:02d}"
+                
                 clean_out = ansi_escape.sub('', raw_output)
                 # Sanitizer: Hide real server paths from public users
                 clean_out = clean_out.replace(jail_dir, "/workspace")
                 
                 lines = [line.strip() for line in clean_out.split('\n') if line.strip()]
-                if len(lines) > 8:
-                    lines = lines[-8:]
+                if len(lines) > 12:
+                    lines = lines[-12:]
                 
                 if not lines:
                     terminal_block = "> Booting virtual machine..."
@@ -1013,7 +1027,7 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                     if not terminal_block.startswith(">"):
                         terminal_block = "> " + terminal_block
                         
-                live_ui = f"🖥️ **Agent Sandbox (Live)**\n```text\n{terminal_block}\n```\n────────────────────\n⏳ **Status:** {current_action}"
+                live_ui = f"🖥️ **Agent Sandbox (Live)**\n```text\n{terminal_block}\n```\n────────────────────\n⏱️ **Elapsed:** `{timer_str}`\n⏳ **Status:** {current_action}"
                 
                 if live_ui != last_sent:
                     try:
