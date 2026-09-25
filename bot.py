@@ -61,6 +61,20 @@ async def claude_proxy_handler(request):
     try:
         body = await request.json()
         
+        # ── Layer 3: Deep Packet Inspection Firewall ─────────────────
+        role = request.query.get('role', 'admin')
+        if role == 'public':
+            body_str = json.dumps(body).lower()
+            blocked_keywords = [
+                "/opt", "/root", "/var", "/etc", "bot.py", "config.py", "deploy", 
+                "config_manager.py", "log_reader.py", ".env", ".git", 
+                "curl ", "wget ", "nc ", "nmap ", "ping ", "ssh ", "scp "
+            ]
+            if any(b in body_str for b in blocked_keywords):
+                logger.error(f"DPI Firewall blocked malicious public agent request.")
+                return web.Response(status=403, text='{"error": {"type": "permission_error", "message": "Security Firewall: Command Blocked"}}', content_type="application/json")
+        # ─────────────────────────────────────────────────────────────
+        
         headers = dict(request.headers)
         headers.pop('Host', None)
         headers.pop('Content-Length', None)
@@ -881,6 +895,118 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         is_running = False
         stream_task.cancel()
         ui_task.cancel()
+
+ACTIVE_AGENTS = 0
+MAX_AGENTS = 3
+
+async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global ACTIVE_AGENTS
+    user = update.effective_user
+    if not await check_access(update):
+        return
+
+    task = " ".join(context.args) if context.args else None
+    if not task:
+        await update.message.reply_text("🖥️ **Public Agent Sandbox**\nUsage: `/agent <your task>`\nExample: `/agent Build a snake game in HTML and zip it`", parse_mode='Markdown')
+        return
+
+    if ACTIVE_AGENTS >= MAX_AGENTS:
+        await update.message.reply_text("⏳ All 3 Agent Sandbox lanes are currently busy. Please try again in a minute.")
+        return
+
+    ACTIVE_AGENTS += 1
+    status_msg = await update.message.reply_text("🚀 Booting up your secure virtual machine...")
+
+    import tempfile, shutil
+    jail_dir = tempfile.mkdtemp(prefix=f"hermes_jail_{user.id}_")
+    
+    try:
+        from config import get_next_claude_model, get_provider_info
+        model_to_use = get_next_claude_model()
+        base_url, api_key, extra_headers = get_provider_info(model_to_use)
+        
+        # Layer 2: Amnesia Environment Scrubbing
+        safe_env = {
+            "PATH": os.environ.get("PATH", ""),
+            "ANTHROPIC_API_KEY": api_key,
+            # Point to local proxy WITH public role query param for DPI Firewall
+            "ANTHROPIC_BASE_URL": "http://127.0.0.1:8080/?role=public" 
+        }
+        
+        sys_prompt = "You are a secure, public coding assistant running in an ephemeral sandbox. Write code, test it, and solve the user's problem. When you are finished, just stop."
+        import shlex
+        cmd = f"npx -y @anthropic-ai/claude-code -p {shlex.quote(task)} --model claude-3-5-sonnet-20241022 --permission-mode bypassPermissions --system-prompt {shlex.quote(sys_prompt)}"
+        
+        await status_msg.edit_text("⚙️ Agent is writing and testing code... (Max 3 minutes)")
+        
+        process = await asyncio.create_subprocess_shell(
+            cmd, cwd=jail_dir, env=safe_env,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        
+        # Layer 4: Time-Bomb Jail
+        try:
+            await asyncio.wait_for(process.communicate(), timeout=180)
+            await status_msg.edit_text("✅ Agent finished task. Zipping your artifacts...")
+        except asyncio.TimeoutError:
+            process.kill()
+            await status_msg.edit_text("⏱️ **Time Bomb Triggered**: Agent exceeded the 3-minute limit and was terminated.")
+            
+        # ── Layer 7: HTML Preview Scraper ────────────────────────────
+        html_found = False
+        html_content = ""
+        for root_dir, dirs, files in os.walk(jail_dir):
+            for file in files:
+                if file.endswith(".html"):
+                    try:
+                        with open(os.path.join(root_dir, file), 'r', encoding='utf-8') as f:
+                            html_content = f.read()
+                            html_found = True
+                            break
+                    except Exception:
+                        pass
+            if html_found:
+                break
+                
+        # Zipping and Output
+        zip_path = f"{jail_dir}_archive.zip"
+        shutil.make_archive(zip_path.replace('.zip', ''), 'zip', jail_dir)
+        
+        if os.path.exists(zip_path) and os.path.getsize(zip_path) > 100:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+            reply_markup = None
+            caption = "📦 Here is the final output from your agent's sandbox!"
+            
+            if html_found:
+                import keep_alive
+                keep_alive.html_previews[str(user.id)] = html_content
+                
+                # Setup auto-delete task for RAM protection
+                async def expire_preview(uid):
+                    await asyncio.sleep(600) # 10 mins
+                    if uid in keep_alive.html_previews:
+                        del keep_alive.html_previews[uid]
+                asyncio.create_task(expire_preview(str(user.id)))
+                
+                render_url = os.environ.get("RENDER_EXTERNAL_URL")
+                if render_url:
+                    preview_url = f"{render_url}/preview/{user.id}"
+                    keyboard = [[InlineKeyboardButton("🌐 Live Preview", web_app=WebAppInfo(url=preview_url))]]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    caption += "\n\nI detected a website! Tap the button below to preview it safely."
+            
+            with open(zip_path, 'rb') as f:
+                await update.message.reply_document(document=f, filename="agent_workspace.zip", caption=caption, reply_markup=reply_markup)
+        
+        if os.path.exists(zip_path):
+            os.remove(zip_path)
+            
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Error booting sandbox: {e}")
+    finally:
+        # Auto Cleanup
+        shutil.rmtree(jail_dir, ignore_errors=True)
+        ACTIVE_AGENTS = max(0, ACTIVE_AGENTS - 1)
 
 async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
@@ -2084,7 +2210,8 @@ async def post_init(application: Application) -> None:
             {'command': 'search', 'description': 'Search the web for real-time info'},
             {'command': 'imagine', 'description': 'Generate an AI image from a prompt'},
             {'command': 'model', 'description': 'List or switch AI models'},
-            {'command': 'mode', 'description': 'Switch between different AI personas and behaviors'}
+            {'command': 'mode', 'description': 'Switch between different AI personas and behaviors'},
+            {'command': 'agent', 'description': 'Spawn an autonomous virtual sandbox agent'}
         ]
         
         try:
@@ -2167,6 +2294,7 @@ def main() -> None:
     application.add_handler(CommandHandler("ban", ban_command))
     application.add_handler(CommandHandler("unban", unban_command))
     application.add_handler(CommandHandler("claude", claude_command))
+    application.add_handler(CommandHandler("agent", agent_command))
     application.add_handler(CommandHandler("stopclaude", stopclaude_command))
     application.add_handler(CommandHandler("claudestatus", claudestatus_command))
     application.add_handler(CallbackQueryHandler(mode_callback, pattern='^mode_'))
