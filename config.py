@@ -41,6 +41,16 @@ seekai_key_iterator = itertools.cycle(SEEKAI_API_KEYS)
 def get_seekai_key():
     return next(seekai_key_iterator)
 
+# Conduit — Round-robin across multiple keys for Claude CLI
+CONDUIT_API_KEYS = [
+    "sk-cdt-eyJpZCI6IjE4NjQ4MTEwOTciLCJ1IjoiIiwibiI6ImRlZmF1bHQiLCJqIjoiZGVmYXVsdCIsImsiOiJhcGkifQ.8omON19NcZSVPa13v_8z6Ymj2qvItnXPlXs0Eod6OJE",
+    "sk-cdt-eyJpZCI6Ijg1NTU0MjkyMjIiLCJ1IjoiIiwibiI6ImRlZmF1bHQiLCJqIjoiZGVmYXVsdCIsImsiOiJhcGkifQ.hb5pY1WsMS2aW-8vvYkHIEFud-gzd4LSZ3ZgUkUtbZA"
+]
+conduit_key_iterator = itertools.cycle(CONDUIT_API_KEYS)
+
+def get_conduit_key():
+    return next(conduit_key_iterator)
+
 # OpenRouter — single key, routes to many free models
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
@@ -104,7 +114,7 @@ MODELS = {
     # --- Conduit (Claude Proxy) ---
     "claude-sonnet-4.6": {
         "url": "https://conduit.ozdoev.net/v1",
-        "key": "sk-cdt-eyJpZCI6IjE4NjQ4MTEwOTciLCJ1IjoiIiwibiI6ImRlZmF1bHQiLCJqIjoiZGVmYXVsdCIsImsiOiJhcGkifQ.8omON19NcZSVPa13v_8z6Ymj2qvItnXPlXs0Eod6OJE",
+        "key_func": get_conduit_key,
         "extra_headers": {"anthropic-version": "2023-06-01"},
         "cli_only": True
     },
