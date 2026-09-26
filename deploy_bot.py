@@ -22,7 +22,7 @@ def deploy():
         
     print("Copying modified config.py...")
     shutil.copy("config.py", f"{tmp_dir}/config.py")
-    
+            
     print("Committing and pushing...")
     os.chdir(tmp_dir)
     os.system('git config user.name "CogniX Auto-Updater"')

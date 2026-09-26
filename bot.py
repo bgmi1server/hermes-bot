@@ -113,8 +113,8 @@ async def claude_proxy_handler(request):
                 
                 try:
                     async with session.post(target, json=body, headers=headers) as resp:
-                        # If we hit a known rate limit or server timeout, retry transparently!
-                        if resp.status in [429, 500, 502, 503, 504, 522, 524] and attempt < max_attempts - 1:
+                        # If we hit a known rate limit, out of credits, or server timeout, retry transparently!
+                        if resp.status in [402, 403, 429, 500, 502, 503, 504, 522, 524] and attempt < max_attempts - 1:
                             logger.warning(f"Claude Proxy Attempt {attempt+1} failed with {resp.status} on {current_url}. Retrying...")
                             continue
                             

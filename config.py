@@ -88,7 +88,7 @@ MODELS = {
     # --- VyceAI (Claude Proxy) ---
     "claude-sonnet-4-6": {
         "url": "https://vyceai.com/v1",
-        "key": "sk-977f24686bf98b713d70bfea6fc1bca154498bf111ef2247",
+        "key": "sk-ebadd39789735ec25072b720470d5b360aae371a231352d7",
         "extra_headers": {"anthropic-version": "2023-06-01"},
         "cli_only": True
     }
