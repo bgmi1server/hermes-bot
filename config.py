@@ -27,6 +27,20 @@ poolside_key_iterator = itertools.cycle(POOLSIDE_API_KEYS) if POOLSIDE_API_KEYS 
 def get_poolside_key():
     return next(poolside_key_iterator) if poolside_key_iterator else ""
 
+# SeekAI — Round-robin across multiple keys for free text chat models
+SEEKAI_API_KEYS = [
+    "sk-M6Yy22PAuPRb5bEwJpatK3H1W2GaikZ2zkNFoZdCdP3h4Jwp",
+    "sk-lwPVU0Fg2Pf3GzSDDTxD7E9MFSdnNRs3izxkmHUsAoErCWx1",
+    "sk-q4dUt9wzrI3uKnVPZSWkY5GZbTvtVGRZJiFpyGkNu4Wq7aaV",
+    "sk-znhyN1KTWCytg9Zng3kupLrmUa9ls9nPfamy0IQIfrWY05Tk",
+    "sk-qkPC0UYCvma0y2SXaDOA2zxSeaNXsOSgMhixOlVzCOjDtFlj",
+    "sk-IHqM3amdBXRsiZteWASJXFKV2J6mWjlDqW9ZX71yVjjtvMpn"
+]
+seekai_key_iterator = itertools.cycle(SEEKAI_API_KEYS)
+
+def get_seekai_key():
+    return next(seekai_key_iterator)
+
 # OpenRouter — single key, routes to many free models
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
@@ -77,6 +91,16 @@ MODELS = {
         "key": OPENROUTER_API_KEY
     },
     
+    # --- SeekAI Free Models (Text Chat Only) ---
+    "seekai/glm-5.3-flash": {
+        "url": "https://seekai.cc/v1",
+        "key_func": get_seekai_key
+    },
+    "seekai/deepseek-v4.1-flash": {
+        "url": "https://seekai.cc/v1",
+        "key_func": get_seekai_key
+    },
+    
     # --- Conduit (Claude Proxy) ---
     "claude-sonnet-4.6": {
         "url": "https://conduit.ozdoev.net/v1",
@@ -119,8 +143,16 @@ def get_next_model():
             
     return next(chat_model_iterator)
 
+def get_primary_claude_model():
+    """Returns the highest priority HEALTHY Claude model (e.g. Conduit)."""
+    pool = HEALTHY_MODELS if HEALTHY_MODELS else CLAUDE_CLI_MODELS
+    for m in CLAUDE_CLI_MODELS:
+        if m in pool:
+            return m
+    return CLAUDE_CLI_MODELS[0] if CLAUDE_CLI_MODELS else None
+
 def get_next_claude_model():
-    """Returns the next HEALTHY Claude-specific model for the CLI."""
+    """Returns the next HEALTHY Claude-specific model for the CLI fallback."""
     global claude_model_iterator
     pool = HEALTHY_MODELS if HEALTHY_MODELS else CLAUDE_CLI_MODELS
     

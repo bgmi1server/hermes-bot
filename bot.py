@@ -15,7 +15,7 @@ from telegram.ext import (
 try:
     from config import (
         BOT_TOKEN, ADMIN_ID, GUEST_IDS,
-        get_provider_info, get_next_model, get_next_claude_model,
+        get_provider_info, get_next_model, get_next_claude_model, get_primary_claude_model,
         AVAILABLE_MODELS, DEFAULT_MODEL, TAVILY_API_KEY
     )
 except ImportError:
@@ -677,9 +677,9 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     # Apply round-robin selection across all configured providers
-    from config import get_next_claude_model, get_provider_info
+    from config import get_primary_claude_model, get_provider_info
     
-    model_to_use = get_next_claude_model()
+    model_to_use = get_primary_claude_model()
     base_url, api_key, extra_headers = get_provider_info(model_to_use)
     
     if not api_key:
@@ -939,8 +939,8 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     jail_dir = tempfile.mkdtemp(prefix=f"hermes_jail_{user.id}_")
     
     try:
-        from config import get_next_claude_model, get_provider_info
-        model_to_use = get_next_claude_model()
+        from config import get_primary_claude_model, get_provider_info
+        model_to_use = get_primary_claude_model()
         base_url, api_key, extra_headers = get_provider_info(model_to_use)
         
         # Layer 2: Amnesia Environment Scrubbing + Cache Isolation
