@@ -92,32 +92,32 @@ MODELS = {
         "key": GROQ_API_KEY
     },
     # --- Custom Proxy Free Models (Based on User's API constraints) ---
-    "qwen3.8-27b-free": {
-        "url": "https://openrouter.ai/api/v1",
-        "key": OPENROUTER_API_KEY
-    },
-    "glm-5.3-flash-free": {
-        "url": "https://openrouter.ai/api/v1",
-        "key": OPENROUTER_API_KEY
-    },
+#     "qwen3.8-27b-free": {
+#         "url": "https://openrouter.ai/api/v1",
+#         "key": OPENROUTER_API_KEY
+#     },
+#     "glm-5.3-flash-free": {
+#         "url": "https://openrouter.ai/api/v1",
+#         "key": OPENROUTER_API_KEY
+#     },
     
     # --- SeekAI Free Models (Text Chat Only) ---
-    "seekai/glm-5.3-flash": {
-        "url": "https://seekai.cc/v1",
-        "key_func": get_seekai_key
-    },
-    "seekai/deepseek-v4.1-flash": {
-        "url": "https://seekai.cc/v1",
-        "key_func": get_seekai_key
-    },
+#     "seekai/glm-5.3-flash": {
+#         "url": "https://seekai.cc/v1",
+#         "key_func": get_seekai_key
+#     },
+#     "seekai/deepseek-v4.1-flash": {
+#         "url": "https://seekai.cc/v1",
+#         "key_func": get_seekai_key
+#     },
     
     # --- Conduit (Claude Proxy) ---
-    "claude-sonnet-4.6": {
-        "url": "https://conduit.ozdoev.net/v1",
-        "key_func": get_conduit_key,
-        "extra_headers": {"anthropic-version": "2023-06-01"},
-        "cli_only": True
-    },
+#     "claude-sonnet-4.6": {
+#         "url": "https://conduit.ozdoev.net/v1",
+#         "key_func": get_conduit_key,
+#         "extra_headers": {"anthropic-version": "2023-06-01"},
+#         "cli_only": True
+#     },
     
     # --- VyceAI (Claude Proxy) ---
     "claude-sonnet-4-6": {
