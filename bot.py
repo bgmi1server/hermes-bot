@@ -852,7 +852,7 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             # Wait, git status only shows modified/untracked. If they modified index.html, it's in stdout.
             if b"index.html" in stdout or (zip_sent and os.path.exists(os.path.join(WORKSPACE_DIR, "index.html"))):
                 render_url = os.environ.get("RENDER_EXTERNAL_URL", "http://127.0.0.1:8080")
-                preview_url = f"{render_url}/preview/index.html"
+                preview_url = f"{render_url}/workspace/index.html"
                 preview_text = f"\n🌐 **Live Website:** [Click here to view it live]({preview_url})"
         
         clean_out = ansi_escape.sub('', raw_output)

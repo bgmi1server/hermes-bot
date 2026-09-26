@@ -5,7 +5,7 @@ import os
 app = Flask(__name__)
 WORKSPACE_DIR = os.path.join(os.getcwd(), "agent_workspace")
 
-@app.route('/preview/<path:filename>')
+@app.route('/workspace/<path:filename>')
 def serve_preview(filename):
     """Serve generated files directly from the agent_workspace."""
     if not os.path.exists(WORKSPACE_DIR):
