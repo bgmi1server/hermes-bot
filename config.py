@@ -77,14 +77,14 @@ MODELS = {
     },
 
     # --- OpenRouter Free Models ---
-    "nvidia/nemotron-3-super-120b-a12b:free": {
-        "url": "https://openrouter.ai/api/v1",
-        "key": OPENROUTER_API_KEY,
-        "extra_headers": {
-            "HTTP-Referer": "https://hermes-bot.onrender.com",
-            "X-Title": "Hermes Telegram Bot"
-        }
-    },
+#     "nvidia/nemotron-3-super-120b-a12b:free": {
+#         "url": "https://openrouter.ai/api/v1",
+#         "key": OPENROUTER_API_KEY,
+#         "extra_headers": {
+#             "HTTP-Referer": "https://hermes-bot.onrender.com",
+#             "X-Title": "Hermes Telegram Bot"
+#         }
+#     },
 
     # --- Groq (Ultra-fast — activate key at console.groq.com) ---
     "qwen/qwen3.8-27b": {
