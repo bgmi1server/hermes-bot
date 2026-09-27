@@ -88,13 +88,13 @@ async def claude_proxy_handler(request):
         current_url = PROXY_TARGET_URL
         current_model = PROXY_TARGET_MODEL
         
-        max_attempts = 3
+        max_attempts = 4
         async with aiohttp.ClientSession() as session:
             for attempt in range(max_attempts):
                 if attempt > 0:
                     # Switch to the next model in the pool on failure
-                    logger.warning(f"Claude Proxy switching endpoints due to failure...")
-                    new_model_name = get_next_claude_model()
+                    new_model_name = get_next_claude_model(current_model)
+                    logger.warning(f"Claude Proxy switching from {current_model} to {new_model_name} due to failure...")
                     base_url, new_api_key, extra_headers = get_provider_info(new_model_name)
                     current_url = base_url
                     current_model = new_model_name

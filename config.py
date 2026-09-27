@@ -118,6 +118,20 @@ MODELS = {
         "extra_headers": {"anthropic-version": "2023-06-01"},
         "cli_only": True
     },
+    "claude-haiku-4.5": {
+        "url": "https://conduit.ozdoev.net/v1",
+        "key_func": get_conduit_key,
+        "extra_headers": {"anthropic-version": "2023-06-01"},
+        "cli_only": True
+    },
+
+    # --- VyceAI (Claude Proxy Fallback) ---
+    "claude-sonnet-4-6": {
+        "url": "https://vyceai.com/v1",
+        "key": "sk-ebadd39789735ec25072b720470d5b360aae371a231352d7",
+        "extra_headers": {"anthropic-version": "2023-06-01"},
+        "cli_only": True
+    },
 }
 
 # ALL models for health checking
@@ -146,18 +160,28 @@ def get_next_model():
     return next(chat_model_iterator)
 
 def get_primary_claude_model():
-    """Returns the highest priority HEALTHY Claude model (e.g. Conduit)."""
+    """Returns the highest priority HEALTHY Claude model (Conduit Sonnet)."""
     pool = HEALTHY_MODELS if HEALTHY_MODELS else CLAUDE_CLI_MODELS
     for m in CLAUDE_CLI_MODELS:
         if m in pool:
             return m
     return CLAUDE_CLI_MODELS[0] if CLAUDE_CLI_MODELS else None
 
-def get_next_claude_model():
-    """Returns the next HEALTHY Claude-specific model for the CLI fallback."""
+def get_next_claude_model(current_model=None):
+    """Returns the next HEALTHY Claude-specific model in priority order (Sonnet -> Haiku -> VyceAI)."""
     global claude_model_iterator
     pool = HEALTHY_MODELS if HEALTHY_MODELS else CLAUDE_CLI_MODELS
     
+    if current_model and len(CLAUDE_CLI_MODELS) > 1:
+        try:
+            curr_idx = CLAUDE_CLI_MODELS.index(current_model)
+            for i in range(1, len(CLAUDE_CLI_MODELS)):
+                candidate = CLAUDE_CLI_MODELS[(curr_idx + i) % len(CLAUDE_CLI_MODELS)]
+                if candidate in pool:
+                    return candidate
+        except ValueError:
+            pass
+
     for _ in range(len(CLAUDE_CLI_MODELS)):
         candidate = next(claude_model_iterator)
         if candidate in pool:
