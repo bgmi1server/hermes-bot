@@ -2204,32 +2204,52 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logger.error(f"Vision Error: {e}")
         await status_msg.edit_text("❌ Failed to analyze the image. The vision model might be currently overloaded or the image is too large.")
 
+MODEL_FAILURE_COUNTS = {}
+
 async def check_models_health(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Constantly test every model in background and notify admin on failure/recovery."""
+    """Constantly test every model in background, notify admin on failure/recovery, and permanently remove persistent failures."""
     if not ADMIN_ID:
         return
         
     failed_models = set()
-    from config import ALL_MODELS
+    from config import ALL_MODELS, MODELS
+    import config
     for model in ALL_MODELS:
         base_url, api_key, extra_headers = get_provider_info(model)
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            **extra_headers
-        }
+        info = MODELS.get(model, {})
+        is_cli = info.get("cli_only", False)
+        
+        if is_cli:
+            test_url = f"{base_url}/messages"
+            headers = {
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+                "User-Agent": "Mozilla/5.0",
+                **extra_headers
+            }
+        else:
+            test_url = f"{base_url}/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0",
+                **extra_headers
+            }
+            
         payload = {
             "model": model,
             "messages": [{"role": "user", "content": "ping"}],
             "max_tokens": 5
         }
         try:
-            resp = await http_client.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=10.0)
+            resp = await http_client.post(test_url, headers=headers, json=payload, timeout=10.0)
             resp.raise_for_status()
+            MODEL_FAILURE_COUNTS[model] = 0
         except Exception:
             failed_models.add(model)
+            MODEL_FAILURE_COUNTS[model] = MODEL_FAILURE_COUNTS.get(model, 0) + 1
             
-    import config
     old_failed = set(ALL_MODELS) - set(config.HEALTHY_MODELS)
     
     # Update global health list
@@ -2252,6 +2272,24 @@ async def check_models_health(context: ContextTypes.DEFAULT_TYPE) -> None:
             parse_mode='Markdown'
         )
         
+    # Permanently remove models that fail 3 consecutive checks
+    for model in list(failed_models):
+        if MODEL_FAILURE_COUNTS.get(model, 0) >= 3:
+            try:
+                import config_manager
+                import deploy_bot
+                logger.warning(f"Model {model} failed 3 consecutive health checks. Permanently removing...")
+                if config_manager.disable_model(model):
+                    deploy_bot.deploy()
+                    MODEL_FAILURE_COUNTS.pop(model, None)
+                    await context.bot.send_message(
+                        chat_id=ADMIN_ID,
+                        text=f"🗑️ **Permanent Model Removal**\nModel `{model}` stopped responding (failed 3 consecutive health checks) and has been permanently removed from `config.py` and deployed to GitHub.",
+                        parse_mode='Markdown'
+                    )
+            except Exception as e:
+                logger.error(f"Failed to auto-remove {model}: {e}")
+        
 async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if user.id != ADMIN_ID:
@@ -2260,21 +2298,37 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     msg = await update.message.reply_text("🩺 Running manual health check on all models...")
     
     failed_models = set()
-    from config import ALL_MODELS
+    from config import ALL_MODELS, MODELS
     for model in ALL_MODELS:
         base_url, api_key, extra_headers = get_provider_info(model)
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            **extra_headers
-        }
+        info = MODELS.get(model, {})
+        is_cli = info.get("cli_only", False)
+        
+        if is_cli:
+            test_url = f"{base_url}/messages"
+            headers = {
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+                "User-Agent": "Mozilla/5.0",
+                **extra_headers
+            }
+        else:
+            test_url = f"{base_url}/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0",
+                **extra_headers
+            }
+            
         payload = {
             "model": model,
             "messages": [{"role": "user", "content": "ping"}],
             "max_tokens": 5
         }
         try:
-            resp = await http_client.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=8.0)
+            resp = await http_client.post(test_url, headers=headers, json=payload, timeout=8.0)
             resp.raise_for_status()
         except Exception:
             failed_models.add(model)

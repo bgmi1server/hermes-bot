@@ -61,6 +61,9 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 ANTHROPIC_BASE_URL = os.environ.get("ANTHROPIC_BASE_URL", "")
 
+# MiniMax — Key for MiniMax reasoning models
+MINIMAX_API_KEY = os.environ.get("MINIMAX_API_KEY", "sk-cp-f1oCRa8f_9MsmAuy_deVyATIhQHvBMvQB4Oj6LnuNfTAEPBN62XvqRg9tEWrWuwOefbN9aoEfU9WEGZ1_f-IDXU0D22YuoWrJv1Vi2yLULTJWHQ5A2lYbcE")
+
 # ==================================
 # Model Routing Registry
 # Only VERIFIED ALIVE models are listed here.
@@ -90,6 +93,12 @@ MODELS = {
     "qwen/qwen3.8-27b": {
         "url": "https://api.groq.com/openai/v1",
         "key": GROQ_API_KEY
+    },
+
+    # --- MiniMax (Reasoning & Tool Calling) ---
+    "MiniMax-M3": {
+        "url": "https://api.minimax.io/v1",
+        "key": MINIMAX_API_KEY
     },
     # --- Custom Proxy Free Models (Based on User's API constraints) ---
 #     "qwen3.8-27b-free": {
