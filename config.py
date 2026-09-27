@@ -96,10 +96,10 @@ MODELS = {
     },
 
     # --- MiniMax (Reasoning & Tool Calling) ---
-    "MiniMax-M3": {
-        "url": "https://api.minimax.io/v1",
-        "key": MINIMAX_API_KEY
-    },
+#     "MiniMax-M3": {
+#         "url": "https://api.minimax.io/v1",
+#         "key": MINIMAX_API_KEY
+#     },
     # --- Custom Proxy Free Models (Based on User's API constraints) ---
 #     "qwen3.8-27b-free": {
 #         "url": "https://openrouter.ai/api/v1",
