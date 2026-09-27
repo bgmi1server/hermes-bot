@@ -127,12 +127,12 @@ MODELS = {
 #         "extra_headers": {"anthropic-version": "2023-06-01"},
 #         "cli_only": True
 #     },
-    "claude-haiku-4.5": {
-        "url": "https://conduit.ozdoev.net/v1",
-        "key_func": get_conduit_key,
-        "extra_headers": {"anthropic-version": "2023-06-01"},
-        "cli_only": True
-    },
+#     "claude-haiku-4.5": {
+#         "url": "https://conduit.ozdoev.net/v1",
+#         "key_func": get_conduit_key,
+#         "extra_headers": {"anthropic-version": "2023-06-01"},
+#         "cli_only": True
+#     },
 
     # --- VyceAI (Claude Proxy Fallback) ---
     "claude-sonnet-4-6": {
