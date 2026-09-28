@@ -630,7 +630,7 @@ async def sync_workspace_to_github(push=False, commit_msg="Auto-save by Claude")
             # Remove empty workspace dir if it exists to allow clone
             if not os.listdir(WORKSPACE_DIR):
                 os.rmdir(WORKSPACE_DIR)
-            proc = await asyncio.create_subprocess_shell(f"git clone {repo_url} {WORKSPACE_DIR}")
+            proc = await asyncio.create_subprocess_shell(f"git clone --depth 1 {repo_url} {WORKSPACE_DIR}")
             await proc.communicate()
             if not os.path.exists(WORKSPACE_DIR):
                 os.makedirs(WORKSPACE_DIR, exist_ok=True)
@@ -700,6 +700,7 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     env = os.environ.copy()
     env["ANTHROPIC_API_KEY"] = api_key
     env["ANTHROPIC_BASE_URL"] = "http://127.0.0.1:8080" # Force Claude CLI through our local reverse proxy
+    env["NODE_OPTIONS"] = "--max-old-space-size=160" # Cap Node.js memory to 160MB (Render free tier safe)
         
     standard_model_string = "claude-3-5-sonnet-20241022" 
     
@@ -899,6 +900,7 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         is_running = False
         stream_task.cancel()
         ui_task.cancel()
+        import gc; gc.collect()
 
 ACTIVE_PUBLIC_AGENTS = {}
 MAX_AGENTS = 3
@@ -953,7 +955,8 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "APPDATA": jail_dir,
             "LOCALAPPDATA": jail_dir,
             "CLAUDE_CONFIG_DIR": jail_dir,
-            "npm_config_cache": os.path.join(jail_dir, ".npm")
+            "npm_config_cache": os.path.join(jail_dir, ".npm"),
+            "NODE_OPTIONS": "--max-old-space-size=160"
         }
         
         sys_prompt = "You are a secure, public coding assistant running in an ephemeral sandbox. Write code, test it, and solve the user's problem. When you are finished, just stop."
@@ -1106,6 +1109,7 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         # Auto Cleanup
         shutil.rmtree(jail_dir, ignore_errors=True)
         ACTIVE_PUBLIC_AGENTS.pop(user.id, None)
+        import gc; gc.collect()
 
 async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user

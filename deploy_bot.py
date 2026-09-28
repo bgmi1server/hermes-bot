@@ -15,8 +15,8 @@ def deploy():
     if os.path.exists(tmp_dir):
         shutil.rmtree(tmp_dir)
         
-    print("Cloning main repository...")
-    if os.system(f"git clone {repo_url} {tmp_dir}") != 0:
+    print("Cloning main repository (shallow clone to save RAM)...")
+    if os.system(f"git clone --depth 1 {repo_url} {tmp_dir}") != 0:
         print("Failed to clone repository.")
         return False
         
