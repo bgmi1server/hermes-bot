@@ -2276,24 +2276,6 @@ async def check_models_health(context: ContextTypes.DEFAULT_TYPE) -> None:
             parse_mode='Markdown'
         )
         
-    # Permanently remove models that fail 3 consecutive checks
-    for model in list(failed_models):
-        if MODEL_FAILURE_COUNTS.get(model, 0) >= 3:
-            try:
-                import config_manager
-                import deploy_bot
-                logger.warning(f"Model {model} failed 3 consecutive health checks. Permanently removing...")
-                if config_manager.disable_model(model):
-                    deploy_bot.deploy()
-                    MODEL_FAILURE_COUNTS.pop(model, None)
-                    await context.bot.send_message(
-                        chat_id=ADMIN_ID,
-                        text=f"🗑️ **Permanent Model Removal**\nModel `{model}` stopped responding (failed 3 consecutive health checks) and has been permanently removed from `config.py` and deployed to GitHub.",
-                        parse_mode='Markdown'
-                    )
-            except Exception as e:
-                logger.error(f"Failed to auto-remove {model}: {e}")
-        
 async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if user.id != ADMIN_ID:
