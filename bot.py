@@ -42,6 +42,7 @@ user_modes = {}   # {user_id: mode_name}
 maintenance_mode = False
 banned_users = set()
 ACTIVE_CLAUDE_PROCESS = None
+GLOBAL_AGENT_LOCK = asyncio.Lock()
 
 # Global HTTP client for connection pooling (speeds up requests)
 http_client = httpx.AsyncClient(timeout=120.0)
@@ -88,8 +89,10 @@ async def claude_proxy_handler(request):
         current_url = PROXY_TARGET_URL
         current_model = PROXY_TARGET_MODEL
         
-        max_attempts = 4
-        async with aiohttp.ClientSession() as session:
+        from config import CLAUDE_CLI_MODELS
+        max_attempts = max(len(CLAUDE_CLI_MODELS), 3)
+        proxy_timeout = aiohttp.ClientTimeout(total=55, connect=8)
+        async with aiohttp.ClientSession(timeout=proxy_timeout) as session:
             for attempt in range(max_attempts):
                 if attempt > 0:
                     # Switch to the next model in the pool on failure
@@ -115,7 +118,7 @@ async def claude_proxy_handler(request):
                     async with session.post(target, json=body, headers=headers) as resp:
                         # If we hit a known rate limit, out of credits, or server timeout, retry transparently!
                         if resp.status in [402, 403, 429, 500, 502, 503, 504, 522, 524] and attempt < max_attempts - 1:
-                            logger.warning(f"Claude Proxy Attempt {attempt+1} failed with {resp.status} on {current_url}. Retrying...")
+                            logger.warning(f"Claude Proxy Attempt {attempt+1} failed with {resp.status} on {current_url}. Retrying next model...")
                             continue
                             
                         # Success or final attempt: Stream the response back to Claude CLI
@@ -129,7 +132,7 @@ async def claude_proxy_handler(request):
                         return proxy_resp
                 except Exception as req_err:
                     if attempt < max_attempts - 1:
-                        logger.warning(f"Claude Proxy Network Error on attempt {attempt+1}: {req_err}. Retrying...")
+                        logger.warning(f"Claude Proxy Network/Timeout Error on attempt {attempt+1} ({current_url}): {req_err}. Retrying next model...")
                         continue
                     raise req_err
                     
@@ -579,6 +582,24 @@ async def logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 WORKSPACE_DIR = os.path.join(os.getcwd(), "agent_workspace")
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
 
+def kill_process_tree(proc):
+    """Safely and forcefully terminates a process and all of its spawned child processes."""
+    if not proc:
+        return
+    try:
+        if proc.returncode is None:
+            if os.name == 'nt':
+                import subprocess
+                subprocess.run(['taskkill', '/F', '/T', '/PID', str(proc.pid)], capture_output=True)
+            else:
+                import signal
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
 async def stopclaude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if user.id != ADMIN_ID:
@@ -587,22 +608,11 @@ async def stopclaude_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     global ACTIVE_CLAUDE_PROCESS
     if ACTIVE_CLAUDE_PROCESS:
         try:
-            if ACTIVE_CLAUDE_PROCESS.returncode is None:
-                import signal
-                if os.name == 'nt':
-                    import subprocess
-                    subprocess.run(['taskkill', '/F', '/T', '/PID', str(ACTIVE_CLAUDE_PROCESS.pid)], capture_output=True)
-                else:
-                    os.killpg(os.getpgid(ACTIVE_CLAUDE_PROCESS.pid), signal.SIGKILL)
+            kill_process_tree(ACTIVE_CLAUDE_PROCESS)
             ACTIVE_CLAUDE_PROCESS = None
             await update.message.reply_text("🛑 **Claude Code Agent** has been forcefully terminated.")
         except Exception as e:
-            try:
-                ACTIVE_CLAUDE_PROCESS.kill()
-                ACTIVE_CLAUDE_PROCESS = None
-                await update.message.reply_text("🛑 **Claude Code Agent** was terminated (fallback kill).")
-            except Exception as e2:
-                await update.message.reply_text(f"⚠️ Failed to terminate process tree: {e} | {e2}")
+            await update.message.reply_text(f"⚠️ Failed to terminate process: {e}")
     else:
         await update.message.reply_text("💤 No Claude Code Agent is currently running.")
 
@@ -666,6 +676,12 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("Please provide a task. Usage: /claude <your task>")
         return
 
+    if GLOBAL_AGENT_LOCK.locked():
+        await update.message.reply_text("⏳ An autonomous agent is already running! Only one agent can run at a time to prevent server memory overload. Use /stopclaude or /stopagent if needed.")
+        return
+
+    await GLOBAL_AGENT_LOCK.acquire()
+    
     # 2. Command Firewall (Regex Blocklist)
     # Uses word-boundary regex to avoid false positives (e.g. "nc" inside "functionality")
     dangerous_patterns = [
@@ -674,6 +690,8 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         r"\bnmap\b", r"\bnc\s+-", r"\bnc\b\s+\d",  # nc only when used as netcat (nc -l, nc 1234)
     ]
     if any(re.search(p, task.lower()) for p in dangerous_patterns):
+        if GLOBAL_AGENT_LOCK.locked():
+            GLOBAL_AGENT_LOCK.release()
         await update.message.reply_text("🛡️ **Firewall Alert:** Task blocked due to catastrophic keywords.")
         await notify_admin_error(context, "Claude CLI Firewall", Exception(f"Blocked task: {task}"))
         return
@@ -685,6 +703,8 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     base_url, api_key, extra_headers = get_provider_info(model_to_use)
     
     if not api_key:
+        if GLOBAL_AGENT_LOCK.locked():
+            GLOBAL_AGENT_LOCK.release()
         await update.message.reply_text("❌ The selected model does not have a valid API key configured.")
         return
 
@@ -702,8 +722,8 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     env = os.environ.copy()
     env["ANTHROPIC_API_KEY"] = api_key
     env["ANTHROPIC_BASE_URL"] = "http://127.0.0.1:8080" # Force Claude CLI through our local reverse proxy
-    env["NODE_OPTIONS"] = "--max-old-space-size=160" # Cap Node.js memory to 160MB (Render free tier safe)
-        
+    env["NODE_OPTIONS"] = "--max-old-space-size=128" # Cap Node.js memory to 128MB (Render free tier safe)
+    
     standard_model_string = "claude-3-5-sonnet-20241022" 
     
     try:
@@ -878,10 +898,8 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await status_msg.edit_text(final_ui, parse_mode='Markdown')
         
     except asyncio.TimeoutError:
-        try:
-            process.kill()
-        except Exception:
-            pass
+        kill_process_tree(process)
+        ACTIVE_CLAUDE_PROCESS = None
         clean_out = ansi_escape.sub('', raw_output)
         lines = [line.strip() for line in clean_out.split('\n') if line.strip()]
         if len(lines) > 20:
@@ -893,26 +911,31 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await status_msg.edit_text(f"🛑 **TIMEOUT KILL-SWITCH ACTIVATED**\nAgent ran longer than 30 minutes and was terminated.\n\n```text\n{terminal_block}\n```", parse_mode='Markdown')
         await notify_admin_error(context, "Claude CLI Timeout", Exception("Agent killed after 30 mins."))
     except Exception as e:
-        try:
-            process.kill()
-        except Exception:
-            pass
+        kill_process_tree(process)
+        ACTIVE_CLAUDE_PROCESS = None
         await status_msg.edit_text(f"❌ **Agent Error**\n\n```\n{e}\n```", parse_mode='Markdown')
     finally:
+        ACTIVE_CLAUDE_PROCESS = None
         is_running = False
-        stream_task.cancel()
-        ui_task.cancel()
+        try:
+            stream_task.cancel()
+            ui_task.cancel()
+        except Exception:
+            pass
+        if GLOBAL_AGENT_LOCK.locked():
+            GLOBAL_AGENT_LOCK.release()
         import gc; gc.collect()
 
 ACTIVE_PUBLIC_AGENTS = {}
-MAX_AGENTS = 3
+MAX_AGENTS = 1
 
 async def stopagent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     process = ACTIVE_PUBLIC_AGENTS.get(user.id)
     if process:
         try:
-            process.kill()
+            kill_process_tree(process)
+            ACTIVE_PUBLIC_AGENTS.pop(user.id, None)
             await update.message.reply_text("🛑 Your agent has been forcefully stopped.")
         except Exception as e:
             await update.message.reply_text(f"⚠️ Failed to stop agent: {e}")
@@ -933,14 +956,17 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("🖥️ **Public Agent Sandbox**\nUsage: `/agent <your task>`\nExample: `/agent Build a snake game in HTML and zip it`", parse_mode='Markdown')
         return
 
-    if len(ACTIVE_PUBLIC_AGENTS) >= MAX_AGENTS:
-        await update.message.reply_text("⏳ All 3 Agent Sandbox lanes are currently busy. Please try again in a minute.")
+    if GLOBAL_AGENT_LOCK.locked():
+        await update.message.reply_text("⏳ The Agent Sandbox is currently busy executing another task. To prevent server memory overload, only one agent can run at a time across the bot. Please try again in a couple of minutes.")
         return
 
+    await GLOBAL_AGENT_LOCK.acquire()
     status_msg = await update.message.reply_text("🚀 Booting up your secure virtual machine...")
 
     import tempfile, shutil
     jail_dir = tempfile.mkdtemp(prefix=f"hermes_jail_{user.id}_")
+    shared_npm_cache = os.path.join(tempfile.gettempdir(), "hermes_npm_shared_cache")
+    os.makedirs(shared_npm_cache, exist_ok=True)
     
     try:
         from config import get_primary_claude_model, get_provider_info
@@ -957,8 +983,8 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "APPDATA": jail_dir,
             "LOCALAPPDATA": jail_dir,
             "CLAUDE_CONFIG_DIR": jail_dir,
-            "npm_config_cache": os.path.join(jail_dir, ".npm"),
-            "NODE_OPTIONS": "--max-old-space-size=160"
+            "npm_config_cache": shared_npm_cache,
+            "NODE_OPTIONS": "--max-old-space-size=128"
         }
         
         sys_prompt = "You are a secure, public coding assistant running in an ephemeral sandbox. Write code, test it, and solve the user's problem. When you are finished, just stop."
@@ -1049,12 +1075,15 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await asyncio.wait_for(process.wait(), timeout=600)
             await status_msg.edit_text("✅ Agent finished task. Zipping your artifacts...")
         except asyncio.TimeoutError:
-            process.kill()
+            kill_process_tree(process)
             await status_msg.edit_text("⏱️ **Time Bomb Triggered**: Agent exceeded the 10-minute limit and was terminated.")
         finally:
             is_running = False
-            stream_task.cancel()
-            ui_task.cancel()
+            try:
+                stream_task.cancel()
+                ui_task.cancel()
+            except Exception:
+                pass
             
         # ── Layer 7: HTML Preview Scraper ────────────────────────────
         html_found = False
@@ -1109,8 +1138,11 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await status_msg.edit_text(f"❌ Error booting sandbox: {e}")
     finally:
         # Auto Cleanup
+        kill_process_tree(ACTIVE_PUBLIC_AGENTS.get(user.id))
         shutil.rmtree(jail_dir, ignore_errors=True)
         ACTIVE_PUBLIC_AGENTS.pop(user.id, None)
+        if GLOBAL_AGENT_LOCK.locked():
+            GLOBAL_AGENT_LOCK.release()
         import gc; gc.collect()
 
 async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

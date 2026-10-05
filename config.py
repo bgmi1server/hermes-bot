@@ -120,7 +120,15 @@ MODELS = {
 #         "key_func": get_seekai_key
 #     },
     
-    # --- Conduit (Claude Proxy) ---
+    # --- VyceAI (Claude Proxy - Primary Working Model) ---
+    "claude-sonnet-4-6": {
+        "url": "https://vyceai.com/v1",
+        "key": "sk-ebadd39789735ec25072b720470d5b360aae371a231352d7",
+        "extra_headers": {"anthropic-version": "2023-06-01"},
+        "cli_only": True
+    },
+
+    # --- Conduit (Claude Proxy Fallback) ---
     "claude-sonnet-4.6": {
         "url": "https://conduit.ozdoev.net/v1",
         "key_func": get_conduit_key,
@@ -130,14 +138,6 @@ MODELS = {
     "claude-haiku-4.5": {
         "url": "https://conduit.ozdoev.net/v1",
         "key_func": get_conduit_key,
-        "extra_headers": {"anthropic-version": "2023-06-01"},
-        "cli_only": True
-    },
-
-    # --- VyceAI (Claude Proxy Fallback) ---
-    "claude-sonnet-4-6": {
-        "url": "https://vyceai.com/v1",
-        "key": "sk-ebadd39789735ec25072b720470d5b360aae371a231352d7",
         "extra_headers": {"anthropic-version": "2023-06-01"},
         "cli_only": True
     },
