@@ -739,11 +739,12 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         PROXY_TARGET_URL = base_url
         PROXY_TARGET_MODEL = model_to_use
 
+        # Send popup UI immediately so the user sees real-time progress right away
+        ui_header = f"🤖 **𝗔𝗴𝗲𝗻𝘁 𝗖𝗹𝗮𝘂𝗱𝗲 (Active)**\n⚙️ Model: `{model_to_use}`\n────────────────────\n"
+        status_msg = await update.message.reply_text(f"{ui_header}⏳ *Syncing workspace and initializing agent...*", parse_mode='Markdown')
+
         # Pull latest from GitHub Workspace DB
         await sync_workspace_to_github(push=False)
-
-        ui_header = f"🤖 **𝗔𝗴𝗲𝗻𝘁 𝗖𝗹𝗮𝘂𝗱𝗲 (Active)**\n⚙️ Model: `{model_to_use}`\n────────────────────\n"
-        status_msg = await update.message.reply_text(f"{ui_header}⏳ *Syncing workspace and initializing...*", parse_mode='Markdown')
 
         env = os.environ.copy()
         env["ANTHROPIC_API_KEY"] = api_key
@@ -853,7 +854,12 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     await status_msg.edit_text(live_ui, parse_mode='Markdown')
                     last_sent = live_ui
                 except Exception:
-                    pass
+                    try:
+                        plain_ui = f"🤖 Agent Claude (Active)\n⚙️ Model: {model_to_use}\n────────────────────\n[Live Terminal]\n{terminal_block}\n────────────────────\n⏱️ Elapsed: {timer_str}\n⏳ Status: {current_action}"
+                        await status_msg.edit_text(plain_ui)
+                        last_sent = live_ui
+                    except Exception:
+                        pass
 
     try:
         # Run reader and UI updater concurrently
@@ -920,7 +926,14 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         else:
             final_ui = f"⚠️ **𝗔𝗴𝗲𝗻𝘁 𝗖𝗹𝗮𝘂𝗱𝗲 (Error Code {process.returncode})**\n⚙️ Model: `{model_to_use}`\n────────────────────\n**[Final Logs]**\n```text\n{terminal_block}\n```\n────────────────────{repo_msg}{preview_text}"
             
-        await status_msg.edit_text(final_ui, parse_mode='Markdown')
+        try:
+            await status_msg.edit_text(final_ui, parse_mode='Markdown')
+        except Exception:
+            try:
+                plain_final = f"Agent Claude (Finished)\nModel: {model_to_use}\n\n[Final Output]\n{terminal_block}\n\n{repo_msg}{preview_text}"
+                await status_msg.edit_text(plain_final)
+            except Exception:
+                pass
         
     except asyncio.TimeoutError:
         kill_process_tree(process)
