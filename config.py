@@ -95,6 +95,12 @@ MODELS = {
         "key": GROQ_API_KEY
     },
 
+    # --- Azkia Cloud (Free Chat Model) ---
+    "deepseek-v4-flash:azkia": {
+        "url": "https://api.azkia.cloud/v1",
+        "key": "sk-kia_OZRU6i9awLXLr8qjKLdKx4ZXLuv4ucHyQdjbE048mXYljfqY"
+    },
+
     # --- MiniMax (Reasoning & Tool Calling) ---
 #     "MiniMax-M3": {
 #         "url": "https://api.minimax.io/v1",

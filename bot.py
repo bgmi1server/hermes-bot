@@ -605,14 +605,25 @@ async def stopclaude_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if user.id != ADMIN_ID:
         return
         
-    global ACTIVE_CLAUDE_PROCESS
+    global ACTIVE_CLAUDE_PROCESS, GLOBAL_AGENT_LOCK
+    killed = False
     if ACTIVE_CLAUDE_PROCESS:
         try:
             kill_process_tree(ACTIVE_CLAUDE_PROCESS)
             ACTIVE_CLAUDE_PROCESS = None
-            await update.message.reply_text("🛑 **Claude Code Agent** has been forcefully terminated.")
+            killed = True
         except Exception as e:
-            await update.message.reply_text(f"⚠️ Failed to terminate process: {e}")
+            logger.error(f"Failed to terminate process: {e}")
+            
+    if GLOBAL_AGENT_LOCK.locked():
+        try:
+            GLOBAL_AGENT_LOCK.release()
+            killed = True
+        except RuntimeError:
+            pass
+            
+    if killed:
+        await update.message.reply_text("🛑 **Claude Code Agent** and all running agent locks have been forcefully terminated.")
     else:
         await update.message.reply_text("💤 No Claude Code Agent is currently running.")
 
@@ -621,11 +632,13 @@ async def claudestatus_command(update: Update, context: ContextTypes.DEFAULT_TYP
     if user.id != ADMIN_ID:
         return
         
-    global ACTIVE_CLAUDE_PROCESS
-    if ACTIVE_CLAUDE_PROCESS and ACTIVE_CLAUDE_PROCESS.returncode is None:
+    global ACTIVE_CLAUDE_PROCESS, GLOBAL_AGENT_LOCK
+    is_running = (ACTIVE_CLAUDE_PROCESS and ACTIVE_CLAUDE_PROCESS.returncode is None) or GLOBAL_AGENT_LOCK.locked()
+    if is_running:
         await update.message.reply_text("🟢 **Claude Code Agent** is currently running.")
     else:
         await update.message.reply_text("💤 **Claude Code Agent** is idle.")
+
 async def sync_workspace_to_github(push=False, commit_msg="Auto-save by Claude"):
     """Syncs the agent_workspace with the hermes-workspace GitHub repo."""
     try:
@@ -634,14 +647,22 @@ async def sync_workspace_to_github(push=False, commit_msg="Auto-save by Claude")
             return
             
         repo_url = f"https://oauth2:{GITHUB_PAT}@github.com/bgmi1server/hermes-workspace.git"
+        git_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
         
         # If workspace isn't a git repo, clone it
         if not os.path.exists(os.path.join(WORKSPACE_DIR, ".git")):
             # Remove empty workspace dir if it exists to allow clone
             if not os.listdir(WORKSPACE_DIR):
                 os.rmdir(WORKSPACE_DIR)
-            proc = await asyncio.create_subprocess_shell(f"git clone --depth 1 {repo_url} {WORKSPACE_DIR}")
-            await proc.communicate()
+            proc = await asyncio.create_subprocess_shell(
+                f"git clone --depth 1 {repo_url} {WORKSPACE_DIR}",
+                env=git_env
+            )
+            try:
+                await asyncio.wait_for(proc.communicate(), timeout=20)
+            except asyncio.TimeoutError:
+                kill_process_tree(proc)
+                logger.error("GitHub clone timed out.")
             if not os.path.exists(WORKSPACE_DIR):
                 os.makedirs(WORKSPACE_DIR, exist_ok=True)
                 
@@ -655,12 +676,20 @@ async def sync_workspace_to_github(push=False, commit_msg="Auto-save by Claude")
                 "git push origin main"
             ]
             for cmd in cmds:
-                proc = await asyncio.create_subprocess_shell(cmd, cwd=WORKSPACE_DIR)
-                await proc.communicate()
+                proc = await asyncio.create_subprocess_shell(cmd, cwd=WORKSPACE_DIR, env=git_env)
+                try:
+                    await asyncio.wait_for(proc.communicate(), timeout=15)
+                except asyncio.TimeoutError:
+                    kill_process_tree(proc)
+                    logger.error(f"GitHub command '{cmd}' timed out.")
         else:
             # Pull latest
-            proc = await asyncio.create_subprocess_shell("git pull origin main", cwd=WORKSPACE_DIR)
-            await proc.communicate()
+            proc = await asyncio.create_subprocess_shell("git pull origin main", cwd=WORKSPACE_DIR, env=git_env)
+            try:
+                await asyncio.wait_for(proc.communicate(), timeout=15)
+            except asyncio.TimeoutError:
+                kill_process_tree(proc)
+                logger.error("GitHub pull timed out.")
     except Exception as e:
         logger.error(f"GitHub Sync Error: {e}")
 
@@ -682,51 +711,47 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     await GLOBAL_AGENT_LOCK.acquire()
     
-    # 2. Command Firewall (Regex Blocklist)
-    # Uses word-boundary regex to avoid false positives (e.g. "nc" inside "functionality")
-    dangerous_patterns = [
-        r"\brm\s+-rf\b", r"\bsudo\b", r"\breboot\b", r"\bshutdown\b", r"\bmkfs\b",
-        r"\bchmod\s+-[rR]\b", r"\bchown\b", r"\bwget\b", r"\bcurl\b",
-        r"\bnmap\b", r"\bnc\s+-", r"\bnc\b\s+\d",  # nc only when used as netcat (nc -l, nc 1234)
-    ]
-    if any(re.search(p, task.lower()) for p in dangerous_patterns):
-        if GLOBAL_AGENT_LOCK.locked():
-            GLOBAL_AGENT_LOCK.release()
-        await update.message.reply_text("🛡️ **Firewall Alert:** Task blocked due to catastrophic keywords.")
-        await notify_admin_error(context, "Claude CLI Firewall", Exception(f"Blocked task: {task}"))
-        return
-
-    # Apply round-robin selection across all configured providers
-    from config import get_primary_claude_model, get_provider_info
-    
-    model_to_use = get_primary_claude_model()
-    base_url, api_key, extra_headers = get_provider_info(model_to_use)
-    
-    if not api_key:
-        if GLOBAL_AGENT_LOCK.locked():
-            GLOBAL_AGENT_LOCK.release()
-        await update.message.reply_text("❌ The selected model does not have a valid API key configured.")
-        return
-
-    # Set up global proxy targets so the local proxy knows where to route
-    global PROXY_TARGET_URL, PROXY_TARGET_MODEL
-    PROXY_TARGET_URL = base_url
-    PROXY_TARGET_MODEL = model_to_use
-
-    # Pull latest from GitHub Workspace DB
-    await sync_workspace_to_github(push=False)
-
-    ui_header = f"🤖 **𝗔𝗴𝗲𝗻𝘁 𝗖𝗹𝗮𝘂𝗱𝗲 (Active)**\n⚙️ Model: `{model_to_use}`\n────────────────────\n"
-    status_msg = await update.message.reply_text(f"{ui_header}⏳ *Syncing workspace and initializing...*", parse_mode='Markdown')
-
-    env = os.environ.copy()
-    env["ANTHROPIC_API_KEY"] = api_key
-    env["ANTHROPIC_BASE_URL"] = "http://127.0.0.1:8080" # Force Claude CLI through our local reverse proxy
-    env["NODE_OPTIONS"] = "--max-old-space-size=128" # Cap Node.js memory to 128MB (Render free tier safe)
-    
-    standard_model_string = "claude-3-5-sonnet-20241022" 
-    
     try:
+        # 2. Command Firewall (Regex Blocklist)
+        # Uses word-boundary regex to avoid false positives (e.g. "nc" inside "functionality")
+        dangerous_patterns = [
+            r"\brm\s+-rf\b", r"\bsudo\b", r"\breboot\b", r"\bshutdown\b", r"\bmkfs\b",
+            r"\bchmod\s+-[rR]\b", r"\bchown\b", r"\bwget\b", r"\bcurl\b",
+            r"\bnmap\b", r"\bnc\s+-", r"\bnc\b\s+\d",  # nc only when used as netcat (nc -l, nc 1234)
+        ]
+        if any(re.search(p, task.lower()) for p in dangerous_patterns):
+            await update.message.reply_text("🛡️ **Firewall Alert:** Task blocked due to catastrophic keywords.")
+            await notify_admin_error(context, "Claude CLI Firewall", Exception(f"Blocked task: {task}"))
+            return
+
+        # Apply round-robin selection across all configured providers
+        from config import get_primary_claude_model, get_provider_info
+        
+        model_to_use = get_primary_claude_model()
+        base_url, api_key, extra_headers = get_provider_info(model_to_use)
+        
+        if not api_key:
+            await update.message.reply_text("❌ The selected model does not have a valid API key configured.")
+            return
+
+        # Set up global proxy targets so the local proxy knows where to route
+        global PROXY_TARGET_URL, PROXY_TARGET_MODEL
+        PROXY_TARGET_URL = base_url
+        PROXY_TARGET_MODEL = model_to_use
+
+        # Pull latest from GitHub Workspace DB
+        await sync_workspace_to_github(push=False)
+
+        ui_header = f"🤖 **𝗔𝗴𝗲𝗻𝘁 𝗖𝗹𝗮𝘂𝗱𝗲 (Active)**\n⚙️ Model: `{model_to_use}`\n────────────────────\n"
+        status_msg = await update.message.reply_text(f"{ui_header}⏳ *Syncing workspace and initializing...*", parse_mode='Markdown')
+
+        env = os.environ.copy()
+        env["ANTHROPIC_API_KEY"] = api_key
+        env["ANTHROPIC_BASE_URL"] = "http://127.0.0.1:8080" # Force Claude CLI through our local reverse proxy
+        env["NODE_OPTIONS"] = "--max-old-space-size=128" # Cap Node.js memory to 128MB (Render free tier safe)
+        
+        standard_model_string = "claude-3-5-sonnet-20241022" 
+        
         import shlex
         
         system_prompt = (
@@ -918,12 +943,17 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         ACTIVE_CLAUDE_PROCESS = None
         is_running = False
         try:
-            stream_task.cancel()
-            ui_task.cancel()
+            if 'stream_task' in locals() and stream_task:
+                stream_task.cancel()
+            if 'ui_task' in locals() and ui_task:
+                ui_task.cancel()
         except Exception:
             pass
         if GLOBAL_AGENT_LOCK.locked():
-            GLOBAL_AGENT_LOCK.release()
+            try:
+                GLOBAL_AGENT_LOCK.release()
+            except RuntimeError:
+                pass
         import gc; gc.collect()
 
 ACTIVE_PUBLIC_AGENTS = {}
@@ -931,14 +961,27 @@ MAX_AGENTS = 1
 
 async def stopagent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
+    global ACTIVE_PUBLIC_AGENTS, GLOBAL_AGENT_LOCK
+    killed = False
     process = ACTIVE_PUBLIC_AGENTS.get(user.id)
     if process:
         try:
             kill_process_tree(process)
             ACTIVE_PUBLIC_AGENTS.pop(user.id, None)
-            await update.message.reply_text("🛑 Your agent has been forcefully stopped.")
+            killed = True
         except Exception as e:
             await update.message.reply_text(f"⚠️ Failed to stop agent: {e}")
+            return
+            
+    if GLOBAL_AGENT_LOCK.locked() and (user.id == ADMIN_ID or user.id in ACTIVE_PUBLIC_AGENTS):
+        try:
+            GLOBAL_AGENT_LOCK.release()
+            killed = True
+        except RuntimeError:
+            pass
+            
+    if killed:
+        await update.message.reply_text("🛑 Your agent has been forcefully stopped.")
     else:
         await update.message.reply_text("You don't have any agents currently running.")
 
@@ -961,14 +1004,15 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     await GLOBAL_AGENT_LOCK.acquire()
-    status_msg = await update.message.reply_text("🚀 Booting up your secure virtual machine...")
-
-    import tempfile, shutil
-    jail_dir = tempfile.mkdtemp(prefix=f"hermes_jail_{user.id}_")
-    shared_npm_cache = os.path.join(tempfile.gettempdir(), "hermes_npm_shared_cache")
-    os.makedirs(shared_npm_cache, exist_ok=True)
-    
+    jail_dir = None
     try:
+        status_msg = await update.message.reply_text("🚀 Booting up your secure virtual machine...")
+
+        import tempfile, shutil
+        jail_dir = tempfile.mkdtemp(prefix=f"hermes_jail_{user.id}_")
+        shared_npm_cache = os.path.join(tempfile.gettempdir(), "hermes_npm_shared_cache")
+        os.makedirs(shared_npm_cache, exist_ok=True)
+        
         from config import get_primary_claude_model, get_provider_info
         model_to_use = get_primary_claude_model()
         base_url, api_key, extra_headers = get_provider_info(model_to_use)
@@ -1139,10 +1183,14 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     finally:
         # Auto Cleanup
         kill_process_tree(ACTIVE_PUBLIC_AGENTS.get(user.id))
-        shutil.rmtree(jail_dir, ignore_errors=True)
+        if jail_dir and os.path.exists(jail_dir):
+            shutil.rmtree(jail_dir, ignore_errors=True)
         ACTIVE_PUBLIC_AGENTS.pop(user.id, None)
         if GLOBAL_AGENT_LOCK.locked():
-            GLOBAL_AGENT_LOCK.release()
+            try:
+                GLOBAL_AGENT_LOCK.release()
+            except RuntimeError:
+                pass
         import gc; gc.collect()
 
 async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
