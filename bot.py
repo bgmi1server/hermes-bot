@@ -42,6 +42,7 @@ user_modes = {}   # {user_id: mode_name}
 maintenance_mode = False
 banned_users = set()
 ACTIVE_CLAUDE_PROCESS = None
+ACTIVE_PUBLIC_AGENTS = {}
 GLOBAL_AGENT_LOCK = asyncio.Lock()
 
 # Global HTTP client for connection pooling (speeds up requests)
@@ -59,6 +60,9 @@ PROXY_TARGET_URL = ""
 PROXY_TARGET_MODEL = ""
 
 async def claude_proxy_handler(request):
+    if request.method in ['GET', 'HEAD']:
+        return web.Response(status=200, text="OK")
+        
     try:
         body = await request.json()
         
@@ -85,11 +89,16 @@ async def claude_proxy_handler(request):
         # Bypass Cloudflare blocks
         headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
         
-        global PROXY_TARGET_URL, PROXY_TARGET_MODEL
-        current_url = PROXY_TARGET_URL
-        current_model = PROXY_TARGET_MODEL
+        from config import CLAUDE_CLI_MODELS, get_primary_claude_model, get_next_claude_model, get_provider_info
+        requested_model = request.query.get('model') or get_primary_claude_model()
+        base_url, api_key, extra_headers = get_provider_info(requested_model)
+        current_url = base_url
+        current_model = requested_model
         
-        from config import CLAUDE_CLI_MODELS
+        headers['x-api-key'] = api_key
+        for k, v in extra_headers.items():
+            headers[k] = v
+        
         max_attempts = max(len(CLAUDE_CLI_MODELS), 3)
         proxy_timeout = aiohttp.ClientTimeout(total=55, connect=8)
         async with aiohttp.ClientSession(timeout=proxy_timeout) as session:
@@ -122,9 +131,6 @@ async def claude_proxy_handler(request):
                             continue
                             
                         # Success or final attempt: Stream the response back to Claude CLI
-                        PROXY_TARGET_URL = current_url
-                        PROXY_TARGET_MODEL = current_model
-                        
                         proxy_resp = web.StreamResponse(status=resp.status, headers=dict(resp.headers))
                         await proxy_resp.prepare(request)
                         async for chunk in resp.content.iter_chunked(4096):
@@ -142,13 +148,12 @@ async def claude_proxy_handler(request):
 
 async def start_local_proxy():
     app = web.Application()
-    app.router.add_post('/messages', claude_proxy_handler)
-    app.router.add_post('/v1/messages', claude_proxy_handler)
+    app.router.add_route('*', '/{tail:.*}', claude_proxy_handler)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '127.0.0.1', 8080)
+    site = web.TCPSite(runner, '127.0.0.1', 8765)
     await site.start()
-    logger.info("Local Claude Proxy started on port 8080")
+    logger.info("Local Claude Proxy started on port 8765")
 import urllib.request
 import urllib.error
 
@@ -600,12 +605,9 @@ def kill_process_tree(proc):
         except Exception:
             pass
 
-async def stopclaude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    if user.id != ADMIN_ID:
-        return
-        
-    global ACTIVE_CLAUDE_PROCESS, GLOBAL_AGENT_LOCK
+async def stop_all_agents() -> bool:
+    """Forcefully terminates all active Claude and Sandbox agent processes across the bot, releasing locks and freeing RAM."""
+    global ACTIVE_CLAUDE_PROCESS, ACTIVE_PUBLIC_AGENTS, GLOBAL_AGENT_LOCK
     killed = False
     if ACTIVE_CLAUDE_PROCESS:
         try:
@@ -613,8 +615,16 @@ async def stopclaude_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             ACTIVE_CLAUDE_PROCESS = None
             killed = True
         except Exception as e:
-            logger.error(f"Failed to terminate process: {e}")
+            logger.error(f"Error terminating ACTIVE_CLAUDE_PROCESS: {e}")
             
+    for uid, proc in list(ACTIVE_PUBLIC_AGENTS.items()):
+        try:
+            kill_process_tree(proc)
+            killed = True
+        except Exception as e:
+            logger.error(f"Error terminating public agent for user {uid}: {e}")
+    ACTIVE_PUBLIC_AGENTS.clear()
+    
     if GLOBAL_AGENT_LOCK.locked():
         try:
             GLOBAL_AGENT_LOCK.release()
@@ -622,8 +632,17 @@ async def stopclaude_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except RuntimeError:
             pass
             
+    import gc; gc.collect()
+    return killed
+
+async def stopclaude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        return
+        
+    killed = await stop_all_agents()
     if killed:
-        await update.message.reply_text("🛑 **Claude Code Agent** and all running agent locks have been forcefully terminated.")
+        await update.message.reply_text("🛑 **Claude Code Agent** and all running agent tasks have been forcefully terminated.")
     else:
         await update.message.reply_text("💤 No Claude Code Agent is currently running.")
 
@@ -632,8 +651,8 @@ async def claudestatus_command(update: Update, context: ContextTypes.DEFAULT_TYP
     if user.id != ADMIN_ID:
         return
         
-    global ACTIVE_CLAUDE_PROCESS, GLOBAL_AGENT_LOCK
-    is_running = (ACTIVE_CLAUDE_PROCESS and ACTIVE_CLAUDE_PROCESS.returncode is None) or GLOBAL_AGENT_LOCK.locked()
+    global ACTIVE_CLAUDE_PROCESS, ACTIVE_PUBLIC_AGENTS, GLOBAL_AGENT_LOCK
+    is_running = (ACTIVE_CLAUDE_PROCESS and ACTIVE_CLAUDE_PROCESS.returncode is None) or bool(ACTIVE_PUBLIC_AGENTS) or GLOBAL_AGENT_LOCK.locked()
     if is_running:
         await update.message.reply_text("🟢 **Claude Code Agent** is currently running.")
     else:
@@ -694,6 +713,7 @@ async def sync_workspace_to_github(push=False, commit_msg="Auto-save by Claude")
         logger.error(f"GitHub Sync Error: {e}")
 
 async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global ACTIVE_CLAUDE_PROCESS
     user = update.effective_user
     # 1. Absolute Access Control
     if user.id != ADMIN_ID:
@@ -705,28 +725,32 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("Please provide a task. Usage: /claude <your task>")
         return
 
-    if GLOBAL_AGENT_LOCK.locked():
-        await update.message.reply_text("⏳ An autonomous agent is already running! Only one agent can run at a time to prevent server memory overload. Use /stopclaude or /stopagent if needed.")
+    # 2. Command Firewall (Regex Blocklist)
+    dangerous_patterns = [
+        r"\brm\s+-rf\b", r"\bsudo\b", r"\breboot\b", r"\bshutdown\b", r"\bmkfs\b",
+        r"\bchmod\s+-[rR]\b", r"\bchown\b", r"\bwget\b", r"\bcurl\b",
+        r"\bnmap\b", r"\bnc\s+-", r"\bnc\b\s+\d",
+    ]
+    if any(re.search(p, task.lower()) for p in dangerous_patterns):
+        await update.message.reply_text("🛡️ **Firewall Alert:** Task blocked due to catastrophic keywords.")
+        await notify_admin_error(context, "Claude CLI Firewall", Exception(f"Blocked task: {task}"))
         return
+
+    # Auto-stop any existing running agent before launching to prevent collisions and RAM overload
+    was_running = False
+    if ACTIVE_CLAUDE_PROCESS or ACTIVE_PUBLIC_AGENTS or GLOBAL_AGENT_LOCK.locked():
+        was_running = await stop_all_agents()
+        await asyncio.sleep(0.5)
 
     await GLOBAL_AGENT_LOCK.acquire()
     
+    clean_claude_dir = None
+    process = None
+    stream_task = None
+    ui_task = None
+    status_msg = None
     try:
-        # 2. Command Firewall (Regex Blocklist)
-        # Uses word-boundary regex to avoid false positives (e.g. "nc" inside "functionality")
-        dangerous_patterns = [
-            r"\brm\s+-rf\b", r"\bsudo\b", r"\breboot\b", r"\bshutdown\b", r"\bmkfs\b",
-            r"\bchmod\s+-[rR]\b", r"\bchown\b", r"\bwget\b", r"\bcurl\b",
-            r"\bnmap\b", r"\bnc\s+-", r"\bnc\b\s+\d",  # nc only when used as netcat (nc -l, nc 1234)
-        ]
-        if any(re.search(p, task.lower()) for p in dangerous_patterns):
-            await update.message.reply_text("🛡️ **Firewall Alert:** Task blocked due to catastrophic keywords.")
-            await notify_admin_error(context, "Claude CLI Firewall", Exception(f"Blocked task: {task}"))
-            return
-
-        # Apply round-robin selection across all configured providers
         from config import get_primary_claude_model, get_provider_info
-        
         model_to_use = get_primary_claude_model()
         base_url, api_key, extra_headers = get_provider_info(model_to_use)
         
@@ -734,22 +758,22 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text("❌ The selected model does not have a valid API key configured.")
             return
 
-        # Set up global proxy targets so the local proxy knows where to route
-        global PROXY_TARGET_URL, PROXY_TARGET_MODEL
-        PROXY_TARGET_URL = base_url
-        PROXY_TARGET_MODEL = model_to_use
-
         # Send popup UI immediately so the user sees real-time progress right away
         ui_header = f"🤖 **𝗔𝗴𝗲𝗻𝘁 𝗖𝗹𝗮𝘂𝗱𝗲 (Active)**\n⚙️ Model: `{model_to_use}`\n────────────────────\n"
-        status_msg = await update.message.reply_text(f"{ui_header}⏳ *Syncing workspace and initializing agent...*", parse_mode='Markdown')
+        init_note = " *(Previous agent terminated)*" if was_running else ""
+        status_msg = await update.message.reply_text(f"{ui_header}⏳ *Syncing workspace and initializing agent...*{init_note}", parse_mode='Markdown')
 
         # Pull latest from GitHub Workspace DB
         await sync_workspace_to_github(push=False)
 
+        import tempfile
+        clean_claude_dir = tempfile.mkdtemp(prefix="claude_admin_cfg_")
+
         env = os.environ.copy()
         env["ANTHROPIC_API_KEY"] = api_key
-        env["ANTHROPIC_BASE_URL"] = "http://127.0.0.1:8080" # Force Claude CLI through our local reverse proxy
-        env["NODE_OPTIONS"] = "--max-old-space-size=128" # Cap Node.js memory to 128MB (Render free tier safe)
+        env["ANTHROPIC_BASE_URL"] = f"http://127.0.0.1:8765/?role=admin&model={model_to_use}"
+        env["CLAUDE_CONFIG_DIR"] = clean_claude_dir
+        env["NODE_OPTIONS"] = "--max-old-space-size=96" # Cap Node.js memory to 96MB (Render free tier safe)
         
         standard_model_string = "claude-3-5-sonnet-20241022" 
         
@@ -767,7 +791,7 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "Always confirm to the user once the deployment is complete."
         )
         
-        inner_cmd = f"npx -y @anthropic-ai/claude-code -p {shlex.quote(task)} --model {shlex.quote(standard_model_string)} --verbose --permission-mode bypassPermissions --system-prompt {shlex.quote(system_prompt)}"
+        inner_cmd = f"npx -y @anthropic-ai/claude-code --bare -p {shlex.quote(task)} --model {shlex.quote(standard_model_string)} --verbose --permission-mode bypassPermissions --system-prompt {shlex.quote(system_prompt)}"
         
         kwargs = {
             "cwd": WORKSPACE_DIR,
@@ -784,85 +808,72 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             cmd = inner_cmd
             
         process = await asyncio.create_subprocess_shell(cmd, **kwargs)
-        global ACTIVE_CLAUDE_PROCESS
         ACTIVE_CLAUDE_PROCESS = process
-    except Exception as e:
-        await status_msg.edit_text(f"❌ Failed to spawn agent: {e}")
-        return
 
-    # 3. Live Streaming UX + 30 Minute Timeout Kill Switch
-    start_time = time.time()
-    TIMEOUT = 1800 # 30 minutes
-    
-    raw_output = ""
-    current_action = "Initializing..."
-    is_running = True
-    
-    import re
-    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-    
-    async def read_stream():
-        nonlocal raw_output, current_action
-        while is_running:
-            try:
-                # Read chunks of bytes instantly without waiting for a newline character!
-                # This fixes the freeze when Claude Code prints "Thinking..." without a \n
-                chunk = await process.stdout.read(128)
-                if not chunk:
-                    break
-                    
-                text = chunk.decode('utf-8', errors='replace')
-                raw_output += text
-                
-                # Guess action from recent text
-                recent_text = ansi_escape.sub('', raw_output[-200:].lower())
-                if "tool" in recent_text or "running" in recent_text:
-                    current_action = "🔧 Running tools..."
-                elif "thinking" in recent_text:
-                    current_action = "🧠 Thinking..."
-                elif "error" in recent_text:
-                    current_action = "⚠️ API Error encountered!"
-            except Exception:
-                break
-
-    async def update_ui():
-        last_sent = ""
-        while is_running:
-            await asyncio.sleep(3.0)
-            elapsed = int(time.time() - start_time)
-            mins, secs = divmod(elapsed, 60)
-            timer_str = f"{mins:02d}:{secs:02d}"
-            
-            clean_out = ansi_escape.sub('', raw_output)
-            
-            # Format cleanly for telegram (keep last 15 lines for more context)
-            lines = [line.strip() for line in clean_out.split('\n') if line.strip()]
-            if len(lines) > 15:
-                lines = lines[-15:]
-            
-            if not lines:
-                terminal_block = "> Booting AI Engine..."
-            else:
-                terminal_block = "\n> ".join(lines).replace('```', "'''")
-                if not terminal_block.startswith(">"):
-                    terminal_block = "> " + terminal_block
-                
-            live_ui = f"{ui_header}**[Live Terminal]**\n```text\n{terminal_block}\n```\n────────────────────\n⏱️ **Elapsed:** `{timer_str}`\n⏳ **Status:** {current_action}"
-            
-            if live_ui != last_sent:
+        # 3. Live Streaming UX + 30 Minute Timeout Kill Switch
+        start_time = time.time()
+        TIMEOUT = 1800 # 30 minutes
+        
+        raw_output = ""
+        current_action = "Initializing..."
+        is_running = True
+        
+        import re
+        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+        
+        async def read_stream():
+            nonlocal raw_output, current_action
+            while is_running:
                 try:
-                    await status_msg.edit_text(live_ui, parse_mode='Markdown')
-                    last_sent = live_ui
+                    chunk = await process.stdout.read(128)
+                    if not chunk:
+                        break
+                    text = chunk.decode('utf-8', errors='replace')
+                    raw_output += text
+                    recent_text = ansi_escape.sub('', raw_output[-200:].lower())
+                    if "tool" in recent_text or "running" in recent_text:
+                        current_action = "🔧 Running tools..."
+                    elif "thinking" in recent_text:
+                        current_action = "🧠 Thinking..."
+                    elif "error" in recent_text:
+                        current_action = "⚠️ API Error encountered!"
                 except Exception:
+                    break
+
+        async def update_ui():
+            last_sent = ""
+            while is_running:
+                await asyncio.sleep(3.0)
+                elapsed = int(time.time() - start_time)
+                mins, secs = divmod(elapsed, 60)
+                timer_str = f"{mins:02d}:{secs:02d}"
+                
+                clean_out = ansi_escape.sub('', raw_output)
+                lines = [line.strip() for line in clean_out.split('\n') if line.strip()]
+                if len(lines) > 15:
+                    lines = lines[-15:]
+                
+                if not lines:
+                    terminal_block = "> Booting AI Engine..."
+                else:
+                    terminal_block = "\n> ".join(lines).replace('```', "'''")
+                    if not terminal_block.startswith(">"):
+                        terminal_block = "> " + terminal_block
+                    
+                live_ui = f"{ui_header}**[Live Terminal]**\n```text\n{terminal_block}\n```\n────────────────────\n⏱️ **Elapsed:** `{timer_str}`\n⏳ **Status:** {current_action}"
+                
+                if live_ui != last_sent:
                     try:
-                        plain_ui = f"🤖 Agent Claude (Active)\n⚙️ Model: {model_to_use}\n────────────────────\n[Live Terminal]\n{terminal_block}\n────────────────────\n⏱️ Elapsed: {timer_str}\n⏳ Status: {current_action}"
-                        await status_msg.edit_text(plain_ui)
+                        await status_msg.edit_text(live_ui, parse_mode='Markdown')
                         last_sent = live_ui
                     except Exception:
-                        pass
+                        try:
+                            plain_ui = f"🤖 Agent Claude (Active)\n⚙️ Model: {model_to_use}\n────────────────────\n[Live Terminal]\n{terminal_block}\n────────────────────\n⏱️ Elapsed: {timer_str}\n⏳ Status: {current_action}"
+                            await status_msg.edit_text(plain_ui)
+                            last_sent = live_ui
+                        except Exception:
+                            pass
 
-    try:
-        # Run reader and UI updater concurrently
         stream_task = asyncio.create_task(read_stream())
         ui_task = asyncio.create_task(update_ui())
         
@@ -902,8 +913,6 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 if os.path.exists(f"{zip_path}.zip"):
                     os.remove(f"{zip_path}.zip")
                 
-            # Only generate preview if index.html was explicitly created/modified in this run, or exists
-            # Wait, git status only shows modified/untracked. If they modified index.html, it's in stdout.
             if b"index.html" in stdout or (zip_sent and os.path.exists(os.path.join(WORKSPACE_DIR, "index.html"))):
                 render_url = os.environ.get("RENDER_EXTERNAL_URL", "http://127.0.0.1:8080")
                 preview_url = f"{render_url}/workspace/index.html"
@@ -936,8 +945,8 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 pass
         
     except asyncio.TimeoutError:
-        kill_process_tree(process)
-        ACTIVE_CLAUDE_PROCESS = None
+        if process:
+            kill_process_tree(process)
         clean_out = ansi_escape.sub('', raw_output)
         lines = [line.strip() for line in clean_out.split('\n') if line.strip()]
         if len(lines) > 20:
@@ -946,22 +955,32 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if terminal_block:
             terminal_block = "> " + terminal_block
             
-        await status_msg.edit_text(f"🛑 **TIMEOUT KILL-SWITCH ACTIVATED**\nAgent ran longer than 30 minutes and was terminated.\n\n```text\n{terminal_block}\n```", parse_mode='Markdown')
+        if status_msg:
+            await status_msg.edit_text(f"🛑 **TIMEOUT KILL-SWITCH ACTIVATED**\nAgent ran longer than 30 minutes and was terminated.\n\n```text\n{terminal_block}\n```", parse_mode='Markdown')
         await notify_admin_error(context, "Claude CLI Timeout", Exception("Agent killed after 30 mins."))
     except Exception as e:
-        kill_process_tree(process)
-        ACTIVE_CLAUDE_PROCESS = None
-        await status_msg.edit_text(f"❌ **Agent Error**\n\n```\n{e}\n```", parse_mode='Markdown')
+        if process:
+            kill_process_tree(process)
+        if status_msg:
+            await status_msg.edit_text(f"❌ **Agent Error**\n\n```\n{e}\n```", parse_mode='Markdown')
+        else:
+            await update.message.reply_text(f"❌ **Agent Error:** {e}")
     finally:
         ACTIVE_CLAUDE_PROCESS = None
         is_running = False
         try:
-            if 'stream_task' in locals() and stream_task:
+            if stream_task:
                 stream_task.cancel()
-            if 'ui_task' in locals() and ui_task:
+            if ui_task:
                 ui_task.cancel()
         except Exception:
             pass
+        if clean_claude_dir and os.path.exists(clean_claude_dir):
+            try:
+                import shutil
+                shutil.rmtree(clean_claude_dir, ignore_errors=True)
+            except Exception:
+                pass
         if GLOBAL_AGENT_LOCK.locked():
             try:
                 GLOBAL_AGENT_LOCK.release()
@@ -969,24 +988,31 @@ async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 pass
         import gc; gc.collect()
 
-ACTIVE_PUBLIC_AGENTS = {}
 MAX_AGENTS = 1
 
 async def stopagent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     global ACTIVE_PUBLIC_AGENTS, GLOBAL_AGENT_LOCK
+    
+    if user.id == ADMIN_ID:
+        killed = await stop_all_agents()
+        if killed:
+            await update.message.reply_text("🛑 All running agent tasks have been forcefully terminated.")
+        else:
+            await update.message.reply_text("💤 No agents are currently running.")
+        return
+
     killed = False
-    process = ACTIVE_PUBLIC_AGENTS.get(user.id)
+    process = ACTIVE_PUBLIC_AGENTS.pop(user.id, None)
     if process:
         try:
             kill_process_tree(process)
-            ACTIVE_PUBLIC_AGENTS.pop(user.id, None)
             killed = True
         except Exception as e:
             await update.message.reply_text(f"⚠️ Failed to stop agent: {e}")
             return
             
-    if GLOBAL_AGENT_LOCK.locked() and (user.id == ADMIN_ID or user.id in ACTIVE_PUBLIC_AGENTS):
+    if GLOBAL_AGENT_LOCK.locked() and not ACTIVE_CLAUDE_PROCESS and not ACTIVE_PUBLIC_AGENTS:
         try:
             GLOBAL_AGENT_LOCK.release()
             killed = True
@@ -1003,9 +1029,15 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not await check_access(update):
         return
 
+    # Auto-stop previous agent for this user if one is already running
     if user.id in ACTIVE_PUBLIC_AGENTS:
-        await update.message.reply_text("⚠️ You already have an agent running! Use `/stopagent` to kill it first.", parse_mode='Markdown')
-        return
+        old_process = ACTIVE_PUBLIC_AGENTS.pop(user.id, None)
+        if old_process:
+            try:
+                kill_process_tree(old_process)
+                await asyncio.sleep(0.5)
+            except Exception:
+                pass
 
     task = " ".join(context.args) if context.args else None
     if not task:
@@ -1018,6 +1050,10 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     await GLOBAL_AGENT_LOCK.acquire()
     jail_dir = None
+    process = None
+    stream_task = None
+    ui_task = None
+    status_msg = None
     try:
         status_msg = await update.message.reply_text("🚀 Booting up your secure virtual machine...")
 
@@ -1034,19 +1070,19 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         safe_env = {
             "PATH": os.environ.get("PATH", ""),
             "ANTHROPIC_API_KEY": api_key,
-            "ANTHROPIC_BASE_URL": "http://127.0.0.1:8080/?role=public",
+            "ANTHROPIC_BASE_URL": f"http://127.0.0.1:8765/?role=public&model={model_to_use}",
             "HOME": jail_dir,
             "USERPROFILE": jail_dir,
             "APPDATA": jail_dir,
             "LOCALAPPDATA": jail_dir,
             "CLAUDE_CONFIG_DIR": jail_dir,
             "npm_config_cache": shared_npm_cache,
-            "NODE_OPTIONS": "--max-old-space-size=128"
+            "NODE_OPTIONS": "--max-old-space-size=96"
         }
         
         sys_prompt = "You are a secure, public coding assistant running in an ephemeral sandbox. Write code, test it, and solve the user's problem. When you are finished, just stop."
         import shlex
-        inner_cmd = f"npx -y @anthropic-ai/claude-code -p {shlex.quote(task)} --model claude-3-5-sonnet-20241022 --permission-mode bypassPermissions --system-prompt {shlex.quote(sys_prompt)}"
+        inner_cmd = f"npx -y @anthropic-ai/claude-code --bare -p {shlex.quote(task)} --model claude-3-5-sonnet-20241022 --permission-mode bypassPermissions --system-prompt {shlex.quote(sys_prompt)}"
         
         kwargs = {
             "cwd": jail_dir,
@@ -1192,7 +1228,10 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             os.remove(zip_path)
             
     except Exception as e:
-        await status_msg.edit_text(f"❌ Error booting sandbox: {e}")
+        if status_msg:
+            await status_msg.edit_text(f"❌ Error booting sandbox: {e}")
+        else:
+            await update.message.reply_text(f"❌ Error booting sandbox: {e}")
     finally:
         # Auto Cleanup
         kill_process_tree(ACTIVE_PUBLIC_AGENTS.get(user.id))
