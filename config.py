@@ -210,3 +210,36 @@ def get_provider_info(model_name):
     key = info["key_func"]() if "key_func" in info else info.get("key", "")
     extra_headers = info.get("extra_headers", {})
     return info["url"], key, extra_headers
+
+# ==================================
+# DDoS & Rate Limiting Settings
+# ==================================
+RATE_LIMIT_ENABLED = True
+
+# Standard Users: Max requests per sliding window
+RATE_LIMIT_USER_MAX_REQUESTS = int(os.environ.get("RATE_LIMIT_USER_MAX_REQUESTS", "20"))
+RATE_LIMIT_USER_WINDOW_SECONDS = int(os.environ.get("RATE_LIMIT_USER_WINDOW_SECONDS", "60"))
+
+# Burst Protection: Max rapid-fire messages allowed within burst window
+RATE_LIMIT_BURST_MAX = int(os.environ.get("RATE_LIMIT_BURST_MAX", "5"))
+RATE_LIMIT_BURST_SECONDS = int(os.environ.get("RATE_LIMIT_BURST_SECONDS", "5"))
+
+# Admin Limits: Higher ceiling to avoid runaway script loops
+RATE_LIMIT_ADMIN_MAX_REQUESTS = int(os.environ.get("RATE_LIMIT_ADMIN_MAX_REQUESTS", "60"))
+RATE_LIMIT_ADMIN_BURST_MAX = int(os.environ.get("RATE_LIMIT_ADMIN_BURST_MAX", "12"))
+
+# Cooldown Penalties (in seconds)
+RATE_LIMIT_COOLDOWN_SECONDS = int(os.environ.get("RATE_LIMIT_COOLDOWN_SECONDS", "15"))
+RATE_LIMIT_SEVERE_COOLDOWN_SECONDS = int(os.environ.get("RATE_LIMIT_SEVERE_COOLDOWN_SECONDS", "120"))
+
+# Heavy Command Specific Cooldowns (in seconds)
+COMMAND_COOLDOWN_AGENT = int(os.environ.get("COMMAND_COOLDOWN_AGENT", "30")) # 30s between /agent runs
+COMMAND_COOLDOWN_IMAGINE = int(os.environ.get("COMMAND_COOLDOWN_IMAGINE", "15")) # 15s between /imagine runs
+COMMAND_COOLDOWN_SEARCH = int(os.environ.get("COMMAND_COOLDOWN_SEARCH", "5")) # 5s between /search runs
+COMMAND_COOLDOWN_VOICE = int(os.environ.get("COMMAND_COOLDOWN_VOICE", "5")) # 5s between voice transcriptions
+COMMAND_COOLDOWN_PHOTO = int(os.environ.get("COMMAND_COOLDOWN_PHOTO", "5")) # 5s between photo analyses
+COMMAND_COOLDOWN_DOCUMENT = int(os.environ.get("COMMAND_COOLDOWN_DOCUMENT", "10")) # 10s between document analyses
+
+# Web / HTTP Rate Limit (Flask keep_alive)
+HTTP_RATE_LIMIT_MAX_REQUESTS = int(os.environ.get("HTTP_RATE_LIMIT_MAX_REQUESTS", "60"))
+HTTP_RATE_LIMIT_WINDOW_SECONDS = int(os.environ.get("HTTP_RATE_LIMIT_WINDOW_SECONDS", "60"))

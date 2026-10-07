@@ -1,9 +1,56 @@
-from flask import Flask, send_from_directory
-from threading import Thread
 import os
+import time
+from collections import defaultdict, deque
+from flask import Flask, send_from_directory, make_response, request, jsonify
+from threading import Thread
 
 app = Flask(__name__)
+# Security: Cap maximum HTTP request payload to 2MB to prevent RAM exhaustion attacks
+app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024
+
 WORKSPACE_DIR = os.path.join(os.getcwd(), "agent_workspace")
+
+# ==========================================
+# HTTP DDoS & IP Rate Limiting Engine
+# ==========================================
+ip_request_history = defaultdict(deque)
+
+try:
+    from config import HTTP_RATE_LIMIT_MAX_REQUESTS, HTTP_RATE_LIMIT_WINDOW_SECONDS
+except ImportError:
+    HTTP_RATE_LIMIT_MAX_REQUESTS = 60
+    HTTP_RATE_LIMIT_WINDOW_SECONDS = 60
+
+@app.before_request
+def check_ip_rate_limit():
+    # Resolve real client IP behind reverse proxy / Cloudflare / Render
+    forwarded = request.headers.get('X-Forwarded-For')
+    if forwarded:
+        client_ip = forwarded.split(',')[0].strip()
+    else:
+        client_ip = request.remote_addr or 'unknown'
+
+    # Whitelist local health checks & self pings
+    if client_ip in ('127.0.0.1', 'localhost', '::1'):
+        return None
+
+    now = time.time()
+    history = ip_request_history[client_ip]
+    while history and now - history[0] > HTTP_RATE_LIMIT_WINDOW_SECONDS:
+        history.popleft()
+
+    if len(history) >= HTTP_RATE_LIMIT_MAX_REQUESTS:
+        resp = make_response(jsonify({
+            "error": "Too Many Requests",
+            "message": "DDoS Protection: Rate limit exceeded. Please slow down.",
+            "retry_after": HTTP_RATE_LIMIT_WINDOW_SECONDS
+        }), 429)
+        resp.headers['Retry-After'] = str(HTTP_RATE_LIMIT_WINDOW_SECONDS)
+        resp.headers['Content-Type'] = 'application/json'
+        return resp
+
+    history.append(now)
+    return None
 
 @app.route('/workspace/<path:filename>')
 def serve_preview(filename):
@@ -13,8 +60,6 @@ def serve_preview(filename):
     return send_from_directory(WORKSPACE_DIR, filename)
 
 html_previews = {} # In-memory dictionary: user_id -> HTML string
-
-from flask import make_response
 
 @app.route('/preview/<user_id>')
 def preview_handler(user_id):
@@ -356,17 +401,28 @@ def run():
     app.run(host="0.0.0.0", port=port)
 
 def self_ping():
-    """Ping our own URL every 10 minutes to prevent Render from spinning down."""
+    """Ping our own URL every 10 minutes to prevent Render from spinning down and prune rate limiter memory."""
     import time, urllib.request
     render_url = os.environ.get("RENDER_EXTERNAL_URL", "")
-    if not render_url:
-        return
     while True:
         time.sleep(600)  # 10 minutes
+        # Clean up stale IP histories older than 10 minutes
         try:
-            urllib.request.urlopen(render_url, timeout=10)
+            now = time.time()
+            for ip in list(ip_request_history.keys()):
+                history = ip_request_history[ip]
+                while history and now - history[0] > 600:
+                    history.popleft()
+                if not history:
+                    del ip_request_history[ip]
         except Exception:
-            pass  # Silently ignore ping failures
+            pass
+
+        if render_url:
+            try:
+                urllib.request.urlopen(render_url, timeout=10)
+            except Exception:
+                pass  # Silently ignore ping failures
 
 def keep_alive():
     server_thread = Thread(target=run)

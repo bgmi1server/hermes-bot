@@ -5,6 +5,7 @@ import time
 import re
 from telegram import Update, BotCommand, BotCommandScopeDefault, BotCommandScopeChat, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
+    Application,
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
@@ -208,19 +209,222 @@ authorized_users: set = set(GUEST_IDS) | _db_users
 banned_users.update(_db_banned)
 user_strikes = _db_strikes  # Persistent strikes
 
-async def check_access(update: Update) -> bool:
+# ==========================================
+# DDoS & Rate Limiting Engine
+# ==========================================
+from collections import defaultdict, deque
+
+user_request_timestamps = defaultdict(deque)  # user_id -> deque of timestamps
+user_cooldown_expiry = {}                      # user_id -> cooldown expiration timestamp
+user_cooldown_warned = set()                   # user_ids that have been sent a warning for current cooldown
+user_flood_violations = defaultdict(int)       # user_id -> count of spam hits while in cooldown
+user_command_last_used = defaultdict(dict)      # user_id -> {cmd_name: last_timestamp}
+unauth_notice_times = {}                       # user_id -> last_notice_timestamp (anti-reflection shield)
+_last_rate_limit_cleanup = 0                   # cleanup timestamp
+
+def cleanup_rate_limiter_memory() -> None:
+    """Periodically purges stale tracking data from memory to prevent memory leaks."""
+    global _last_rate_limit_cleanup
+    now = time.time()
+    if now - _last_rate_limit_cleanup < 300:
+        return
+    _last_rate_limit_cleanup = now
+    
+    # Prune user_request_timestamps
+    for uid in list(user_request_timestamps.keys()):
+        q = user_request_timestamps[uid]
+        while q and now - q[0] > 120:
+            q.popleft()
+        if not q:
+            user_request_timestamps.pop(uid, None)
+            
+    # Prune expired cooldowns
+    for uid in list(user_cooldown_expiry.keys()):
+        if now >= user_cooldown_expiry[uid]:
+            user_cooldown_expiry.pop(uid, None)
+            user_cooldown_warned.discard(uid)
+            user_flood_violations.pop(uid, None)
+            
+    # Prune unauth notices older than 5 minutes
+    for uid in list(unauth_notice_times.keys()):
+        if now - unauth_notice_times[uid] > 300:
+            unauth_notice_times.pop(uid, None)
+
+async def notify_admin_flood(user_id: int, username: str, duration: int) -> None:
+    """Sends an immediate security alert to Admin when a severe flood attack is mitigated."""
+    if ADMIN_ID and BOT_TOKEN:
+        try:
+            alert_text = (
+                f"🛡️ **DDoS / Flood Shield Activated**\n\n"
+                f"👤 **User:** `{user_id}` (@{username or 'N/A'})\n"
+                f"⚠️ **Action:** High-frequency spamming during cooldown.\n"
+                f"⏱️ **Mute Penalty:** `{duration} seconds`\n\n"
+                f"💡 *Use `/unmute {user_id}` if you wish to reset their cooldown.*"
+            )
+            url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+            await http_client.post(url, json={
+                "chat_id": ADMIN_ID,
+                "text": alert_text,
+                "parse_mode": "Markdown"
+            }, timeout=10.0)
+        except Exception as e:
+            logger.error(f"Failed to alert admin about flood: {e}")
+
+async def send_rejection(update: Update, text: str) -> None:
+    """Safely sends rejection or warning whether update is a message or callback query."""
+    if update.message:
+        try:
+            await update.message.reply_text(text, parse_mode='Markdown')
+        except Exception:
+            try:
+                await update.message.reply_text(text)
+            except Exception:
+                pass
+    elif update.callback_query:
+        try:
+            await update.callback_query.answer(text[:200], show_alert=True)
+        except Exception:
+            pass
+
+async def check_access(update: Update, command_name: str = "general") -> bool:
     user = update.effective_user
-    if user.id == ADMIN_ID:
-        return True
+    if not user:
+        return False
+
+    now = time.time()
+    cleanup_rate_limiter_memory()
+    is_admin = (user.id == ADMIN_ID)
+
+    # ── 1. Anti-Reflection Shield for Banned Users ─────────────────────────
     if user.id in banned_users:
-        await update.message.reply_text("🚫 You have been banned from using this bot.")
+        last_notice = unauth_notice_times.get(user.id, 0)
+        if now - last_notice > 60:
+            unauth_notice_times[user.id] = now
+            await send_rejection(update, "🚫 You have been banned from using this bot.")
         return False
-    if maintenance_mode:
-        await update.message.reply_text("🔧 The bot is currently undergoing maintenance. Please try again later.")
+
+    # ── 2. Maintenance Mode Check ──────────────────────────────────────────
+    if maintenance_mode and not is_admin:
+        last_notice = unauth_notice_times.get(user.id, 0)
+        if now - last_notice > 60:
+            unauth_notice_times[user.id] = now
+            await send_rejection(update, "🔧 The bot is currently undergoing maintenance. Please try again later.")
         return False
-    if user.id not in authorized_users:
-        await update.message.reply_text("⛔ Unauthorized access. You are not on the guest list.")
+
+    # ── 3. Anti-Reflection Shield for Unauthorized Guests ──────────────────
+    if user.id not in authorized_users and not is_admin:
+        last_notice = unauth_notice_times.get(user.id, 0)
+        if now - last_notice > 60:
+            unauth_notice_times[user.id] = now
+            await send_rejection(update, "⛔ Unauthorized access. You are not on the guest list.")
         return False
+
+    # ── 4. DDoS & Rate Limiting Engine ─────────────────────────────────────
+    from config import (
+        RATE_LIMIT_ENABLED,
+        RATE_LIMIT_USER_MAX_REQUESTS, RATE_LIMIT_USER_WINDOW_SECONDS,
+        RATE_LIMIT_BURST_MAX, RATE_LIMIT_BURST_SECONDS,
+        RATE_LIMIT_ADMIN_MAX_REQUESTS, RATE_LIMIT_ADMIN_BURST_MAX,
+        RATE_LIMIT_COOLDOWN_SECONDS, RATE_LIMIT_SEVERE_COOLDOWN_SECONDS,
+        COMMAND_COOLDOWN_AGENT, COMMAND_COOLDOWN_IMAGINE,
+        COMMAND_COOLDOWN_SEARCH, COMMAND_COOLDOWN_VOICE,
+        COMMAND_COOLDOWN_PHOTO, COMMAND_COOLDOWN_DOCUMENT
+    )
+
+    if not RATE_LIMIT_ENABLED:
+        return True
+
+    # A. Active Cooldown Enforcement
+    if user.id in user_cooldown_expiry:
+        expiry = user_cooldown_expiry[user.id]
+        if now < expiry:
+            user_flood_violations[user.id] += 1
+            violations = user_flood_violations[user.id]
+
+            # Severe flood escalation (>10 messages spammed while on cooldown)
+            if violations == 10 and not is_admin:
+                user_cooldown_expiry[user.id] = now + RATE_LIMIT_SEVERE_COOLDOWN_SECONDS
+                await send_rejection(
+                    update,
+                    f"⛔ **Severe Flood Detected:** High-frequency spamming detected. Your account has been temporarily muted for **{RATE_LIMIT_SEVERE_COOLDOWN_SECONDS}s**."
+                )
+                logger.warning(f"Severe flood detected from user {user.id}. Cooldown extended to {RATE_LIMIT_SEVERE_COOLDOWN_SECONDS}s.")
+                asyncio.create_task(notify_admin_flood(user.id, user.username or user.first_name, RATE_LIMIT_SEVERE_COOLDOWN_SECONDS))
+                return False
+
+            # First warning in current cooldown window: inform user with countdown
+            if user.id not in user_cooldown_warned:
+                user_cooldown_warned.add(user.id)
+                wait_secs = max(1, int(expiry - now))
+                await send_rejection(
+                    update,
+                    f"⏳ **Rate Limit Active:** You are sending requests too quickly! Please wait **{wait_secs}s** before trying again."
+                )
+
+            # Silently drop subsequent flooded messages (anti-amplification)
+            return False
+        else:
+            # Cooldown expired: release user
+            user_cooldown_expiry.pop(user.id, None)
+            user_cooldown_warned.discard(user.id)
+            user_flood_violations.pop(user.id, None)
+
+    # B. Sliding Window & Burst Protection
+    q = user_request_timestamps[user.id]
+    window_secs = RATE_LIMIT_USER_WINDOW_SECONDS
+    while q and now - q[0] > window_secs:
+        q.popleft()
+
+    max_requests = RATE_LIMIT_ADMIN_MAX_REQUESTS if is_admin else RATE_LIMIT_USER_MAX_REQUESTS
+    burst_max = RATE_LIMIT_ADMIN_BURST_MAX if is_admin else RATE_LIMIT_BURST_MAX
+    burst_secs = RATE_LIMIT_BURST_SECONDS
+
+    burst_count = sum(1 for t in q if now - t <= burst_secs)
+
+    limit_breached = False
+    if len(q) >= max_requests:
+        limit_breached = True
+        reason = f"Exceeded sustained limit of {max_requests} req/{window_secs}s"
+    elif burst_count >= burst_max:
+        limit_breached = True
+        reason = f"Exceeded burst limit of {burst_max} req/{burst_secs}s"
+
+    if limit_breached:
+        cooldown_dur = RATE_LIMIT_COOLDOWN_SECONDS
+        user_cooldown_expiry[user.id] = now + cooldown_dur
+        user_cooldown_warned.add(user.id)
+        user_flood_violations[user.id] = 1
+        await send_rejection(
+            update,
+            f"⏳ **Rate Limit Triggered:** Please slow down! You are sending requests too quickly. Please wait **{cooldown_dur}s** before sending another message."
+        )
+        logger.warning(f"Rate limit triggered for user {user.id}: {reason}")
+        return False
+
+    # Accept request into sliding window
+    q.append(now)
+
+    # C. Specific Heavy Command Cooldowns
+    cmd_cooldowns = {
+        "agent": COMMAND_COOLDOWN_AGENT,
+        "imagine": COMMAND_COOLDOWN_IMAGINE,
+        "search": COMMAND_COOLDOWN_SEARCH,
+        "voice": COMMAND_COOLDOWN_VOICE,
+        "photo": COMMAND_COOLDOWN_PHOTO,
+        "document": COMMAND_COOLDOWN_DOCUMENT,
+    }
+    if command_name in cmd_cooldowns and not is_admin:
+        cooldown_time = cmd_cooldowns[command_name]
+        last_used = user_command_last_used[user.id].get(command_name, 0)
+        if now - last_used < cooldown_time:
+            remaining = int(cooldown_time - (now - last_used)) + 1
+            await send_rejection(
+                update,
+                f"⏳ **Command Cooldown:** Please wait **{remaining}s** before using `/{command_name}` again."
+            )
+            return False
+        user_command_last_used[user.id][command_name] = now
+
     return True
 
 # ==========================================
@@ -340,18 +544,15 @@ async def mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(f"Invalid mode. Please choose from: {', '.join(MODES_INFO.keys())}")
 
 async def mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    user = query.from_user
-    
-    if user.id not in authorized_users and user.id != ADMIN_ID:
-        await query.answer("Unauthorized.", show_alert=True)
+    if not await check_access(update, command_name="general"):
         return
         
+    query = update.callback_query
     await query.answer()
     
     requested_mode = query.data.replace("mode_", "")
     if requested_mode in MODES_INFO:
-        user_modes[user.id] = requested_mode
+        user_modes[query.from_user.id] = requested_mode
         await query.edit_message_text(
             f"Successfully switched to mode: *{requested_mode}* {MODES_INFO[requested_mode].split()[0]}",
             parse_mode='Markdown'
@@ -359,7 +560,7 @@ async def mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    if not await check_access(update):
+    if not await check_access(update, command_name="search"):
         return
 
     query = " ".join(context.args) if context.args else None
@@ -537,15 +738,36 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     h, m = divmod(m, 60)
     uptime_str = f"{h}h {m}m {s}s"
     
+    active_mutes = sum(1 for exp in user_cooldown_expiry.values() if exp > time.time())
+    
     stats_text = (
         "📊 **Bot Statistics**\n\n"
         f"⏱️ Uptime: `{uptime_str}`\n"
         f"👥 Users: `{len(authorized_users)}`\n"
         f"🚫 Banned: `{len(banned_users)}`\n"
+        f"🛡️ Rate-Limited Users: `{active_mutes}`\n"
         f"🤖 Models: `{len(AVAILABLE_MODELS)}`\n"
         f"🔧 Maintenance: `{'ON' if maintenance_mode else 'OFF'}`"
     )
     await update.message.reply_text(stats_text, parse_mode='Markdown')
+
+async def unmute_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /unmute <user_id>")
+        return
+    try:
+        t_id = int(context.args[0])
+        user_cooldown_expiry.pop(t_id, None)
+        user_cooldown_warned.discard(t_id)
+        user_flood_violations.pop(t_id, None)
+        user_request_timestamps.pop(t_id, None)
+        user_command_last_used.pop(t_id, None)
+        await update.message.reply_text(f"✅ Rate limit and flood cooldown cleared for `{t_id}`.", parse_mode='Markdown')
+    except ValueError:
+        await update.message.reply_text("Invalid user ID.")
 
 async def clearhistory_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
@@ -1026,7 +1248,7 @@ async def stopagent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    if not await check_access(update):
+    if not await check_access(update, command_name="agent"):
         return
 
     # Auto-stop previous agent for this user if one is already running
@@ -1247,7 +1469,7 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    if not await check_access(update):
+    if not await check_access(update, command_name="imagine"):
         return
 
     prompt = " ".join(context.args) if context.args else None
@@ -1501,7 +1723,7 @@ async def summarize_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 async def summarize_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Triggered when user sends any document/file to the bot."""
     user = update.effective_user
-    if not await check_access(update):
+    if not await check_access(update, command_name="document"):
         return
 
     doc = update.message.document
@@ -1796,7 +2018,7 @@ user_modes = {}
 # user_strikes is loaded from GitHub DB at startup (line 102)
 async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE, voice_text: str = None) -> None:
     user = update.effective_user
-    if not await check_access(update):
+    if not await check_access(update, command_name="chat"):
         return
 
     user_message = voice_text if voice_text else update.message.text
@@ -2203,7 +2425,7 @@ import edge_tts
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    if not await check_access(update):
+    if not await check_access(update, command_name="voice"):
         return
 
     status_msg = await update.message.reply_text("🎙️ Listening...")
@@ -2254,7 +2476,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # ==========================================
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    if not await check_access(update):
+    if not await check_access(update, command_name="photo"):
         return
 
     status_msg = await update.message.reply_text("👁️ Analyzing image...")
@@ -2502,6 +2724,7 @@ async def post_init(application: Application) -> None:
                     {'command': 'maintenance', 'description': 'Toggle maintenance mode (Admin)'},
                     {'command': 'ban', 'description': 'Permanently ban a user (Admin)'},
                     {'command': 'unban', 'description': 'Unban a user (Admin)'},
+                    {'command': 'unmute', 'description': 'Reset rate-limit cooldown for a user (Admin)'},
                     {'command': 'claude', 'description': 'Run an autonomous Claude Code CLI task (Admin)'},
                     {'command': 'stopclaude', 'description': 'Stop the currently running Claude agent (Admin)'},
                     {'command': 'claudestatus', 'description': 'Check if a Claude agent is currently running (Admin)'}
@@ -2562,6 +2785,7 @@ def main() -> None:
     application.add_handler(CommandHandler("maintenance", maintenance_command))
     application.add_handler(CommandHandler("ban", ban_command))
     application.add_handler(CommandHandler("unban", unban_command))
+    application.add_handler(CommandHandler("unmute", unmute_command))
     application.add_handler(CommandHandler("claude", claude_command, block=False))
     application.add_handler(CommandHandler("agent", agent_command, block=False))
     application.add_handler(CommandHandler("stopagent", stopagent_command))
